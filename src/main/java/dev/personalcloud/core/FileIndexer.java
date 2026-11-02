@@ -24,6 +24,8 @@ public final class FileIndexer {
         List<FileMetadata> result = new ArrayList<>();
         try (var paths = Files.walk(directory)) {
             paths.filter(path -> !path.equals(directory))
+                    // A process may crash during an upload; never expose its incomplete temporary file.
+                    .filter(path -> !isUploadTemporary(path))
                     .filter(path -> Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS))
                     .forEach(path -> {
                         try {
@@ -40,5 +42,10 @@ public final class FileIndexer {
         }
         result.sort(Comparator.comparing(item -> item.getFilePath().toLowerCase()));
         return result;
+    }
+
+    private static boolean isUploadTemporary(Path path) {
+        String name = path.getFileName().toString();
+        return name.startsWith(".personalcloud-upload-") && name.endsWith(".tmp");
     }
 }

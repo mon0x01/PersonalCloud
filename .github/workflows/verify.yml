@@ -1,0 +1,20 @@
+name: PersonalCloud V1 verification
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify build, unit tests, integration tests, and frontend syntax
+        run: ./scripts/verify.sh

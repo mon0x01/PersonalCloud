@@ -1,41 +1,34 @@
-### IntelliJ IDEA ###
-out/
-!**/src/main/**/out/
-!**/src/test/**/out/
-.kotlin
-
-### Eclipse ###
-.apt_generated
-.classpath
-.factorypath
-.project
-.settings
-.springBeans
-.sts4-cache
-bin/
-!**/src/main/**/bin/
-!**/src/test/**/bin/
-
-### NetBeans ###
-/nbproject/private/
-/nbbuild/
-/dist/
-/nbdist/
-/.nb-gradle/
-
-### VS Code ###
-.vscode/
-
-### Mac OS ###
-.DS_Store
-### Java compiled files ###
-*.class
-.idea/
-
-*.iml
+# Build output
 /build/
+/out/
+*.class
+
+# PersonalCloud runtime data and owned files
 /data/
 /data-*/
+/personalcloud-data/
 /storage/
 /storage-*/
+/personalcloud-manual-test.*/
+
+# IDE and OS metadata
+.idea/
+.vscode/
+.DS_Store
+*.iml
+
+# Logs and transient files
 *.log
+*.tmp
+__pycache__/
+.venv/
+
+# Local secrets and test certificates
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.truststore

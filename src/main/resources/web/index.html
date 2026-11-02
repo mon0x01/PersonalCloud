@@ -12,7 +12,7 @@
   <div class="shell">
     <header class="topbar">
       <div class="brand"><div class="brand-mark">P</div><div><div class="brand-name">PersonalCloud</div><div class="brand-subtitle">Your devices. Your files. Your rules.</div></div></div>
-      <div class="node-chip"><span class="live-dot"></span><span id="node-name">Starting node…</span><span class="chip-divider"></span><span id="node-id-short" class="muted"></span></div>
+      <div class="topbar-actions"><div class="node-chip"><span class="live-dot"></span><span id="node-name">Starting node…</span><span class="chip-divider"></span><span id="node-id-short" class="muted"></span></div><button class="button button-secondary" id="logout">Sign out</button></div>
     </header>
 
     <main>
@@ -22,7 +22,7 @@
           <h1>Your files stay <span>where they belong.</span></h1>
           <p class="hero-copy">This device indexes its own storage and serves only the files you explicitly share with paired devices.</p>
         </div>
-        <div class="hero-stat"><div class="stat-label">LOCAL STORAGE ROOT</div><div class="stat-value" id="storage-root">Loading…</div><div class="stat-note">Files inside this directory can be indexed and shared.</div></div>
+        <div class="hero-stat"><div class="stat-label">LOCAL STORAGE ROOT</div><div class="stat-value" id="storage-root">Loading…</div><div class="stat-note" id="storage-note">Files inside this directory can be indexed and shared.</div></div>
       </section>
 
       <section class="metrics" aria-label="Node summary">
@@ -36,10 +36,27 @@
         <section class="panel main-panel">
           <div class="panel-heading">
             <div><div class="eyebrow">ON THIS DEVICE</div><h2>Local files</h2><p>Files are indexed from your configured storage root.</p></div>
-            <button class="button button-secondary" id="refresh-files">Refresh index</button>
+            <div class="toolbar-actions">
+              <input id="file-search" type="search" placeholder="Search local files" aria-label="Search local files">
+              <input id="upload-files" type="file" multiple hidden>
+              <input id="upload-folder" type="file" webkitdirectory directory multiple hidden>
+              <button class="button button-secondary" id="choose-upload">Upload files</button>
+              <button class="button button-secondary" id="choose-folder-upload">Upload folder</button>
+              <button class="button button-secondary" id="create-folder">New folder</button>
+              <button class="button button-secondary" id="all-versions">Recovery history</button>
+              <button class="button button-secondary" id="refresh-files">Refresh index</button>
+            </div>
           </div>
-          <div class="table-wrap"><table><thead><tr><th>FILE</th><th>SIZE</th><th>MODIFIED</th><th>DOWNLOAD</th></tr></thead><tbody id="files-body"><tr><td colspan="4" class="empty">Loading local files…</td></tr></tbody></table></div>
-          <div class="panel-footnote">Only regular files are indexed. Symbolic links are skipped to prevent sharing files outside the storage root.</div>
+          <div class="table-wrap"><table><thead><tr><th>FILE</th><th>SIZE</th><th>MODIFIED</th><th>ACTIONS</th></tr></thead><tbody id="files-body"><tr><td colspan="4" class="empty">Loading local files…</td></tr></tbody></table></div>
+          <section id="version-panel" class="version-panel hidden">
+            <div class="panel-heading"><div><div class="eyebrow">RECOVERY</div><h3 id="version-title">File history</h3><p>Snapshots are stored locally on this node and are never shared with peers.</p></div><div class="toolbar-actions"><button class="button button-secondary" id="create-version">Create snapshot</button><button class="button button-secondary" id="close-versions">Close</button></div></div>
+            <div class="table-wrap"><table><thead><tr><th>CREATED</th><th>REASON</th><th>SIZE</th><th>SHA-256</th><th></th></tr></thead><tbody id="versions-body"><tr><td colspan="5" class="empty">Loading versions…</td></tr></tbody></table></div>
+          </section>
+          <div class="panel-footnote">Only regular files are indexed. Symbolic links are skipped. Deletes create local recovery snapshots; previews are limited to small text files.</div>
+          <section class="folder-list-panel">
+            <div class="panel-heading"><div><div class="eyebrow">LOCAL ORGANIZATION</div><h3>Folders</h3><p>Select a folder to share it with a paired device, or move/rename it.</p></div><button class="button button-secondary" id="refresh-folders">Refresh</button></div>
+            <div class="table-wrap"><table><thead><tr><th>FOLDER</th><th>ACTIONS</th></tr></thead><tbody id="folders-body"><tr><td colspan="2" class="empty">No folders found.</td></tr></tbody></table></div>
+          </section>
         </section>
 
         <section class="panel pairing-panel">
@@ -48,11 +65,11 @@
             <div class="subpanel-title">1. Let another device pair with this one</div>
             <button class="button button-primary full" id="generate-invite">Generate one-time pairing code</button>
             <div id="invite-result" class="invite-result hidden"></div>
-            <p class="hint">Give this code to the device that will connect to this node. It expires after 10 minutes.</p>
+            <p class="hint">Give this code to the device that will connect to this node. It expires after 10 minutes and can be used once.</p>
           </div>
           <div class="subpanel">
             <div class="subpanel-title">2. Connect this device to another node</div>
-            <label for="peer-url">Other device URL</label><input id="peer-url" type="url" placeholder="http://192.168.1.20:8787" autocomplete="url">
+            <label for="peer-url">Other device URL</label><input id="peer-url" type="url" placeholder="https://device.example.com:8787" autocomplete="url">
             <label for="pairing-code">One-time pairing code</label><input id="pairing-code" type="text" placeholder="16-character code" maxlength="16" autocapitalize="characters">
             <button class="button button-primary full" id="pair-device">Pair with device</button>
           </div>
@@ -65,14 +82,14 @@
       </section>
 
       <section class="panel">
-        <div class="panel-heading"><div><div class="eyebrow">FILE PERMISSIONS</div><h2>Share a local file</h2><p>Choose an incoming paired device and grant access to a file inside this node's storage root.</p></div></div>
+        <div class="panel-heading"><div><div class="eyebrow">FILE PERMISSIONS</div><h2>Share a file or folder</h2><p>Choose an incoming paired device and grant access to a file or an entire folder inside this node's storage root.</p></div></div>
         <form id="share-form" class="form-row">
-          <div class="field-grow"><label for="share-path">Relative file path</label><input id="share-path" required placeholder="documents/report.pdf"></div>
+          <div class="field-grow"><label for="share-path">Relative file or folder path</label><input id="share-path" required placeholder="documents/report.pdf"></div>
           <div><label for="share-peer">Receiving device</label><select id="share-peer" required><option value="">Pair a device first</option></select></div>
           <div><label for="share-permission">Permission</label><select id="share-permission"><option value="VIEW">View + download</option><option value="MODIFY">View + download + delete original</option></select></div>
           <button class="button button-primary form-button" type="submit">Grant access</button>
         </form>
-        <div class="permission-note"><strong>VIEW</strong> allows listing and downloading. <strong>MODIFY</strong> additionally allows the receiving device to delete the original file on this device. Deletion affects every share of that original.</div>
+        <div class="permission-note"><strong>VIEW</strong> allows listing and downloading. <strong>MODIFY</strong> additionally allows the receiving device to delete shared originals. For a folder grant, access is limited to files currently inside that folder; new files appear after the remote list is refreshed.</div>
       </section>
 
       <section class="panel">
@@ -83,11 +100,61 @@
       <section class="panel">
         <div class="panel-heading"><div><div class="eyebrow">REMOTE FILES</div><h2>Files shared with this device</h2><p>Remote files remain on the device that owns them. Downloads are streamed from that peer to this node.</p></div></div>
         <div class="form-row remote-toolbar"><div><label for="remote-peer">Source device</label><select id="remote-peer"><option value="">No outgoing peers</option></select></div><button class="button button-primary form-button" id="load-remote">Load remote shares</button></div>
+        <div class="form-row remote-toolbar"><div><label for="remote-search">Filter remote files</label><input id="remote-search" type="search" placeholder="Search remote files"></div></div>
         <div class="table-wrap"><table><thead><tr><th>FILE</th><th>SIZE</th><th>ACCESS</th><th></th></tr></thead><tbody id="remote-body"><tr><td colspan="4" class="empty">Choose a source device to view its shared files.</td></tr></tbody></table></div>
       </section>
 
-      <footer><span>PersonalCloud MVP · peer-to-peer file access</span><span id="footer-node"></span></footer>
+      <section class="panel">
+        <div class="panel-heading"><div><div class="eyebrow">ACCOUNT SECURITY</div><h2>Change administrator password</h2><p>Passwords are stored as salted PBKDF2 hashes. Use a unique password of at least 14 characters.</p></div></div>
+        <form id="admin-password-form" class="form-row">
+          <div><label for="current-password">Current password</label><input id="current-password" type="password" autocomplete="current-password" required></div>
+          <div><label for="new-password">New password</label><input id="new-password" type="password" autocomplete="new-password" minlength="14" required></div>
+          <div><label for="confirm-password">Confirm new password</label><input id="confirm-password" type="password" autocomplete="new-password" minlength="14" required></div>
+          <button class="button button-primary form-button" type="submit">Change password</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading"><div><div class="eyebrow">ACCOUNT SECURITY</div><h2>Authenticator MFA</h2><p>Optional TOTP-based second factor with one-time recovery codes. Use an authenticator app compatible with standard TOTP.</p></div></div>
+        <div class="mfa-row"><div><strong id="mfa-status">Checking MFA status…</strong><p id="mfa-note" class="hint">MFA is stored on this node and required for future dashboard sign-ins after enrollment.</p></div><button class="button button-primary" id="setup-mfa">Set up authenticator</button></div>
+        <div id="mfa-setup" class="subpanel hidden">
+          <div class="subpanel-title">Add this secret to your authenticator app</div>
+          <code id="mfa-secret" class="mfa-secret"></code>
+          <p class="hint">The otpauth URI can also be imported manually. Keep the secret private.</p>
+          <code id="mfa-uri" class="mfa-uri"></code>
+          <label for="mfa-enable-code">6-digit authenticator code</label><input id="mfa-enable-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456">
+          <button class="button button-primary full" id="confirm-mfa">Verify and enable MFA</button>
+        </div>
+        <div id="recovery-codes-panel" class="subpanel hidden">
+          <div class="subpanel-title">Save these one-time recovery codes now</div><p class="hint">Each code works once. They will not be displayed again.</p>
+          <pre id="recovery-codes" class="recovery-codes"></pre>
+        </div>
+        <form id="disable-mfa-form" class="form-row hidden">
+          <div><label for="disable-mfa-password">Administrator password</label><input id="disable-mfa-password" type="password" autocomplete="current-password"></div>
+          <div><label for="disable-mfa-code">Authenticator / recovery code</label><input id="disable-mfa-code" autocomplete="one-time-code"></div>
+          <button class="button button-secondary form-button" type="submit">Disable MFA</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading"><div><div class="eyebrow">SECURITY / OPERATIONS</div><h2>Recent activity</h2><p>Administrative and file-access events recorded locally on this node.</p></div><button class="button button-secondary" id="refresh-activity">Refresh</button></div>
+        <div class="table-wrap"><table><thead><tr><th>TIME</th><th>EVENT</th><th>ACTOR</th><th>DETAIL</th></tr></thead><tbody id="activity-body"><tr><td colspan="4" class="empty">Loading activity…</td></tr></tbody></table></div>
+      </section>
+
+      <footer><span>PersonalCloud · local-first peer file access</span><span id="footer-node"></span></footer>
     </main>
+  </div>
+  <div id="auth-screen" class="auth-screen">
+    <form id="login-form" class="auth-card">
+      <div class="eyebrow">LOCAL NODE AUTHENTICATION</div>
+      <h2>Sign in to PersonalCloud</h2>
+      <p>Administrator access is required to manage files, devices and permissions.</p>
+      <label for="login-username">Username</label><input id="login-username" value="admin" autocomplete="username" readonly>
+      <label for="login-password">Password</label><input id="login-password" type="password" autocomplete="current-password" required>
+      <div id="login-code-wrap" class="hidden"><label for="login-code">Authenticator / recovery code</label><input id="login-code" inputmode="numeric" autocomplete="one-time-code" maxlength="32"></div>
+      <button class="button button-primary full" type="submit">Sign in</button>
+      <p id="login-hint" class="hint">MFA is optional. If enabled, enter a current six-digit code or an unused recovery code.</p>
+    </form>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 </body>

@@ -13,10 +13,12 @@ import java.util.UUID;
 public final class PeerService {
     private final StateStore store;
     private final AppConfig config;
+    private final TokenVault tokenVault;
 
-    public PeerService(StateStore store, AppConfig config) {
+    public PeerService(StateStore store, AppConfig config) throws Exception {
         this.store = store;
         this.config = config;
+        this.tokenVault = new TokenVault(config.dataDirectory());
     }
 
     public Map<String, Object> nodeInfo() {
@@ -63,7 +65,7 @@ public final class PeerService {
         Map<String, String> fields = new LinkedHashMap<>();
         fields.put("name", safeName(name));
         fields.put("baseUrl", baseUrl);
-        fields.put("accessToken", token);
+        fields.put("accessToken", tokenVault.encrypt(token));
         fields.put("createdAt", Instant.now().toString());
         store.putRecord("peer", nodeId, fields);
     }
@@ -104,7 +106,19 @@ public final class PeerService {
     }
 
     public Map<String, String> outgoingPeer(String nodeId) {
-        return store.getRecord("peer", nodeId);
+        Map<String, String> row = store.getRecord("peer", nodeId);
+        if (row == null) return null;
+        String stored = row.get("accessToken");
+        try {
+            if (stored != null && !tokenVault.isEncrypted(stored)) {
+                row.put("accessToken", tokenVault.encrypt(stored));
+                store.putRecord("peer", nodeId, row);
+            }
+            row.put("accessToken", tokenVault.decrypt(row.get("accessToken")));
+            return row;
+        } catch (Exception e) {
+            throw new IllegalStateException("Cannot decrypt saved peer credentials. Restore data/vault.key or pair this device again.", e);
+        }
     }
 
     public void removeOutgoingPeer(String nodeId) throws Exception { store.removeRecord("peer", nodeId); }

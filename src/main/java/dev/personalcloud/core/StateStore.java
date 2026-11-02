@@ -18,10 +18,22 @@ public final class StateStore {
 
     public StateStore(Path dataDirectory) throws Exception {
         this.file = dataDirectory.resolve("state.properties");
+        Path backup = file.resolveSibling("state.properties.bak");
         if (Files.exists(file)) {
-            try (InputStream in = Files.newInputStream(file)) { data.load(in); }
+            try (InputStream in = Files.newInputStream(file)) {
+                data.load(in);
+            } catch (Exception primaryFailure) {
+                if (!Files.exists(backup)) throw new IllegalStateException("State file is corrupt and no recovery backup exists: " + file, primaryFailure);
+                data.clear();
+                try (InputStream in = Files.newInputStream(backup)) { data.load(in); }
+                Files.copy(backup, file, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } else if (Files.exists(backup)) {
+            try (InputStream in = Files.newInputStream(backup)) { data.load(in); }
+            Files.copy(backup, file, StandardCopyOption.REPLACE_EXISTING);
         }
         SecretFiles.restrict(file);
+        SecretFiles.restrict(backup);
     }
 
     public synchronized String get(String key) { return data.getProperty(key); }
@@ -88,8 +100,17 @@ public final class StateStore {
         Path temp = file.resolveSibling(file.getFileName() + ".tmp");
         try (OutputStream out = Files.newOutputStream(temp)) {
             data.store(out, "PersonalCloud local state. Keep this file private.");
+            out.flush();
+        }
+        try (java.nio.channels.FileChannel channel = java.nio.channels.FileChannel.open(temp, java.nio.file.StandardOpenOption.WRITE)) {
+            channel.force(true);
         }
         SecretFiles.restrict(temp);
+        if (Files.exists(file)) {
+            Path backup = file.resolveSibling("state.properties.bak");
+            Files.copy(file, backup, StandardCopyOption.REPLACE_EXISTING);
+            SecretFiles.restrict(backup);
+        }
         try {
             Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         } catch (Exception atomicMoveUnavailable) {

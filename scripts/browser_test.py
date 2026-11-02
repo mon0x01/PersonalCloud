@@ -1,0 +1,204 @@
+import base64, hashlib, hmac, json, os, struct, time
+from pathlib import Path
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+
+root = Path(os.environ['PC_TEST_ROOT'])
+password_a = os.environ['PC_PASS_A']
+password_b = os.environ['PC_PASS_B']
+base_a = os.environ['PC_BASE_A']
+base_b = os.environ['PC_BASE_B']
+errors = []
+
+def expect(condition, message):
+    if not condition:
+        raise AssertionError(message)
+    print('PASS:', message)
+
+def totp(secret, epoch=None):
+    epoch = int(time.time()) if epoch is None else epoch
+    key = base64.b32decode(secret + '=' * ((8 - len(secret) % 8) % 8))
+    counter = epoch // 30
+    raw = hmac.new(key, struct.pack('>Q', counter), hashlib.sha1).digest()
+    offset = raw[-1] & 15
+    binary = struct.unpack('>I', raw[offset:offset+4])[0] & 0x7fffffff
+    return f'{binary % 1_000_000:06d}'
+
+with sync_playwright() as p:
+    launch_options = {'headless': True, 'args': ['--no-sandbox', '--disable-dev-shm-usage']}
+    executable = os.environ.get('PC_CHROMIUM_EXECUTABLE')
+    if executable:
+        launch_options['executable_path'] = executable
+    browser = p.chromium.launch(**launch_options)
+    ctx_a = browser.new_context(accept_downloads=True)
+    ctx_b = browser.new_context(accept_downloads=True)
+    a = ctx_a.new_page(); b = ctx_b.new_page()
+    a.set_default_timeout(12000); b.set_default_timeout(12000)
+    a.on('pageerror', lambda e: errors.append('A pageerror: '+str(e)))
+    b.on('pageerror', lambda e: errors.append('B pageerror: '+str(e)))
+    print('STEP: navigating to both dashboards', flush=True)
+    a.goto(base_a, wait_until='domcontentloaded')
+    b.goto(base_b, wait_until='domcontentloaded')
+    print('STEP: authenticate nodes', flush=True)
+    expect(a.locator('#auth-screen').is_visible(), 'dashboard presents login screen when unauthenticated')
+    a.locator('#login-password').fill(password_a)
+    a.locator('#login-form button[type=submit]').click()
+    a.locator('#auth-screen').wait_for(state='hidden')
+    b.locator('#login-password').fill(password_b)
+    b.locator('#login-form button[type=submit]').click()
+    b.locator('#auth-screen').wait_for(state='hidden')
+    a.locator('#node-name').filter(has_text='Browser-A').wait_for(state='visible')
+    b.locator('#node-name').filter(has_text='Browser-B').wait_for(state='visible')
+    expect(a.locator('#node-name').inner_text() == 'Browser-A', 'Node A dashboard loads and authenticates')
+    expect(b.locator('#node-name').inner_text() == 'Browser-B', 'Node B dashboard loads and authenticates')
+    expect(a.locator('#files-body').inner_text().find('hello.txt') >= 0, 'local file index renders in the dashboard')
+    print('STEP: external filesystem watcher', flush=True)
+    external_dir = root/'storage-a'/'created-outside-dashboard'
+    external_dir.mkdir()
+    (external_dir/'watcher-visible.txt').write_text('detected by WatchService\n')
+    a.locator('#files-body').get_by_text('watcher-visible.txt').first.wait_for(timeout=10000)
+    a.locator('.share-folder[data-path=\"created-outside-dashboard\"]').wait_for(state='visible', timeout=10000)
+    expect(True, 'external file and new folder appear automatically through filesystem watching')
+
+    print('STEP: browser upload and folder creation', flush=True)
+    # Browser upload and folder creation.
+    upload_file = root / 'browser-upload.txt'
+    upload_file.write_text('uploaded from the browser UI\n')
+    a.locator('#upload-files').set_input_files(str(upload_file))
+    a.get_by_text('browser-upload.txt').first.wait_for(state='attached')
+    a.once('dialog', lambda dialog: dialog.accept('browser-created-folder'))
+    a.locator('#create-folder').click()
+    expect((root/'storage-a'/'browser-created-folder').is_dir(), 'folder creation works through the dashboard')
+    a.locator('#folders-body .share-folder[data-path=\"browser-created-folder\"]').wait_for(state='visible')
+    expect(a.locator('#folders-body .share-folder[data-path=\"browser-created-folder\"]').count() == 1, 'folder list exposes a share action')
+    a.once('dialog', lambda dialog: dialog.accept('browser-renamed-folder'))
+    a.locator('.move-folder[data-path=\"browser-created-folder\"]').click()
+    a.locator('#folders-body .share-folder[data-path=\"browser-renamed-folder\"]').wait_for(state='visible')
+    expect((root/'storage-a'/'browser-renamed-folder').is_dir(), 'folder move/rename works through the dashboard')
+
+    print('STEP: text preview', flush=True)
+    # Text preview opens as a separate plain-text tab.
+    with a.expect_popup() as popup:
+        a.locator('.preview-file[data-path="hello.txt"]').click()
+    preview = popup.value
+    preview.wait_for_load_state('domcontentloaded')
+    expect('Browser test content' in preview.locator('body').inner_text(), 'text preview opens in a separate browser tab')
+    preview.close()
+
+    print('STEP: pair devices', flush=True)
+    # Pair B to A using a one-time invite generated by A.
+    a.locator('#generate-invite').click()
+    invite_code = a.locator('.invite-code').inner_text().strip()
+    b.locator('#peer-url').fill(base_a)
+    b.locator('#pairing-code').fill(invite_code)
+    b.locator('#pair-device').click()
+    b.get_by_text('Browser-A').first.wait_for(state='attached')
+    a.locator('#refresh-peers').click()
+    a.locator('#share-peer option:not([value=""])').first.wait_for(state='attached')
+    node_b_id = a.locator('#share-peer option:not([value=""])').first.get_attribute('value')
+    node_a_id = b.locator('#remote-peer option:not([value=""])').first.get_attribute('value')
+    expect(bool(node_a_id) and bool(node_b_id), 'one-time pairing establishes the two peer relationships')
+
+    print('STEP: folder share and ZIP download', flush=True)
+    a.locator('.share-folder[data-path=\"shared-docs\"]').click()
+    expect(a.locator('#share-path').input_value() == 'shared-docs', 'folder action pre-fills the folder sharing form')
+    a.locator('#share-peer').select_option(node_b_id)
+    a.locator('#share-permission').select_option('VIEW')
+    a.locator('#share-form button[type=submit]').click()
+    b.locator('#remote-peer').select_option(node_a_id)
+    b.locator('#load-remote').click()
+    b.locator('#remote-body a[href*=\"/api/remote-folder-download/\"]').wait_for(state='visible')
+    with b.expect_download() as folder_download_info:
+        b.locator('#remote-body a[href*=\"/api/remote-folder-download/\"]').click()
+    folder_download = folder_download_info.value
+    folder_zip = root/'shared-folder-browser.zip'
+    folder_download.save_as(folder_zip)
+    import zipfile
+    with zipfile.ZipFile(folder_zip) as archive:
+        expect(archive.read('nested/brief.txt') == b'folder shared content\n', 'browser folder sharing downloads a correct ZIP preserving nested paths')
+
+    print('STEP: VIEW grant and download', flush=True)
+    # VIEW grant -> listing and download, no remote delete control.
+    a.locator('#share-path').fill('hello.txt')
+    a.locator('#share-peer').select_option(node_b_id)
+    a.locator('#share-permission').select_option('VIEW')
+    a.locator('#share-form button[type=submit]').click()
+    a.locator('.revoke').first.wait_for(state='attached')
+    b.locator('#remote-peer').select_option(node_a_id)
+    b.locator('#load-remote').click()
+    b.locator('#remote-body').get_by_text('hello.txt').first.wait_for()
+    expect(b.locator('.remote-delete').count() == 0, 'VIEW share is visible without a delete control')
+    with b.expect_download() as download_info:
+        b.locator('#remote-body tr').filter(has_text='hello.txt').locator('a[href*=\"/api/remote-download/\"]').click()
+    download = download_info.value
+    saved = root/'browser-remote-download.txt'
+    download.save_as(saved)
+    expect(saved.read_text() == (root/'storage-a'/'hello.txt').read_text(), 'remote browser download matches owner original')
+
+    print('STEP: revoke', flush=True)
+    # Revoke the file grant without affecting the independent folder grant.
+    a.once('dialog', lambda dialog: dialog.accept())
+    a.locator('#grants-body tr').filter(has_text='hello.txt').locator('.revoke').click()
+    b.locator('#load-remote').click()
+    b.locator('#remote-body a[href*=\"/api/remote-folder-download/\"]').wait_for(state='visible')
+    expect(b.locator('#remote-body').get_by_text('hello.txt').count() == 0, 'revocation removes that file from remote listing')
+    expect(b.locator('#remote-body a[href*=\"/api/remote-folder-download/\"]').count() == 1, 'revoking one grant preserves an unrelated folder grant')
+    expect((root/'storage-a'/'hello.txt').exists(), 'revocation preserves owner original')
+    a.once('dialog', lambda dialog: dialog.accept())
+    a.locator('#grants-body tr').filter(has_text='shared-docs').locator('.revoke').click()
+    b.locator('#load-remote').click()
+    b.locator('#remote-body').get_by_text('This device has not shared any files with you.').wait_for()
+    expect('not shared' in b.locator('#remote-body').inner_text().lower(), 'folder grant revocation removes its remote listing')
+
+    print('STEP: MODIFY grant and remote delete', flush=True)
+    # MODIFY grant -> remote delete snapshots the original on the owner node.
+    a.locator('#share-path').fill('modify-me.txt')
+    a.locator('#share-peer').select_option(node_b_id)
+    a.locator('#share-permission').select_option('MODIFY')
+    a.locator('#share-form button[type=submit]').click()
+    b.locator('#load-remote').click()
+    b.locator('#remote-body').get_by_text('modify-me.txt').first.wait_for()
+    expect(b.locator('.remote-delete').count() == 1, 'MODIFY share exposes remote delete action')
+    b.once('dialog', lambda dialog: dialog.accept())
+    b.locator('.remote-delete').click()
+    for _ in range(50):
+        if not (root/'storage-a'/'modify-me.txt').exists(): break
+        time.sleep(0.1)
+    expect(not (root/'storage-a'/'modify-me.txt').exists(), 'MODIFY action deletes original on owner node')
+    a.locator('#refresh-files').click()
+    a.locator('#all-versions').click()
+    a.locator('#versions-body').get_by_text('REMOTE_MODIFY_DELETE').first.wait_for()
+    expect('REMOTE_MODIFY_DELETE' in a.locator('#versions-body').inner_text(), 'remote delete creates owner-local recovery snapshot')
+
+    print('STEP: MFA setup and recovery login', flush=True)
+    # MFA setup; login using a one-time recovery code; then disable with another code.
+    a.locator('#setup-mfa').click()
+    a.locator('#mfa-setup').wait_for(state='visible')
+    secret = a.locator('#mfa-secret').inner_text().strip()
+    generated_code = totp(secret)
+    a.locator('#mfa-enable-code').fill(generated_code)
+    a.locator('#confirm-mfa').click()
+    try:
+        a.locator('#recovery-codes-panel').wait_for(state='visible', timeout=12000)
+    except PlaywrightTimeout:
+        print('MFA enable UI error:', a.locator('#toast').inner_text(), flush=True)
+        raise
+    codes_text = a.locator('#recovery-codes').inner_text()
+    recovery_codes = [x.strip() for x in codes_text.splitlines() if x.strip()]
+    expect(len(recovery_codes) == 10, 'dashboard MFA setup displays ten one-time recovery codes')
+    a.locator('#logout').click()
+    a.locator('#auth-screen').wait_for(state='visible')
+    a.locator('#login-password').fill(password_a)
+    a.locator('#login-code').fill(recovery_codes[0])
+    a.locator('#login-form button[type=submit]').click()
+    a.locator('#auth-screen').wait_for(state='hidden')
+    a.locator('#mfa-status').filter(has_text='9 recovery codes remain').wait_for(state='visible')
+    expect('9 recovery codes remain' in a.locator('#mfa-status').inner_text(), 'browser login accepts a recovery code and consumes it')
+    a.locator('#disable-mfa-password').fill(password_a)
+    a.locator('#disable-mfa-code').fill(recovery_codes[1])
+    a.locator('#disable-mfa-form button[type=submit]').click()
+    a.locator('#mfa-status').filter(has_text='Disabled').wait_for(state='visible')
+    expect('Disabled' in a.locator('#mfa-status').inner_text(), 'MFA can be disabled with password and a second recovery code')
+
+    expect(not errors, 'browser JavaScript ran without uncaught page errors: '+repr(errors))
+    browser.close()
+print('PASS: browser UI workflow across two nodes, uploads, folders, pairing, VIEW/MODIFY, download, revoke, recovery, MFA, and dashboard JavaScript.')
