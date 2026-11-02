@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>PersonalCloud</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand"><div class="brand-mark">P</div><div><div class="brand-name">PersonalCloud</div><div class="brand-subtitle">Your devices. Your files. Your rules.</div></div></div>
+      <div class="node-chip"><span class="live-dot"></span><span id="node-name">Starting node…</span><span class="chip-divider"></span><span id="node-id-short" class="muted"></span></div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div>
+          <div class="eyebrow">PERSONAL NODE</div>
+          <h1>Your files stay <span>where they belong.</span></h1>
+          <p class="hero-copy">This device indexes its own storage and serves only the files you explicitly share with paired devices.</p>
+        </div>
+        <div class="hero-stat"><div class="stat-label">LOCAL STORAGE ROOT</div><div class="stat-value" id="storage-root">Loading…</div><div class="stat-note">Files inside this directory can be indexed and shared.</div></div>
+      </section>
+
+      <section class="metrics" aria-label="Node summary">
+        <div class="metric"><span class="metric-label">LOCAL FILES</span><strong id="metric-files">—</strong></div>
+        <div class="metric"><span class="metric-label">PAIRED DEVICES</span><strong id="metric-peers">—</strong></div>
+        <div class="metric"><span class="metric-label">ACTIVE SHARES</span><strong id="metric-shares">—</strong></div>
+        <div class="metric"><span class="metric-label">NODE STATUS</span><strong class="status-ready"><span class="live-dot"></span> Ready</strong></div>
+      </section>
+
+      <section class="panel-grid">
+        <section class="panel main-panel">
+          <div class="panel-heading">
+            <div><div class="eyebrow">ON THIS DEVICE</div><h2>Local files</h2><p>Files are indexed from your configured storage root.</p></div>
+            <button class="button button-secondary" id="refresh-files">Refresh index</button>
+          </div>
+          <div class="table-wrap"><table><thead><tr><th>FILE</th><th>SIZE</th><th>MODIFIED</th><th>DOWNLOAD</th></tr></thead><tbody id="files-body"><tr><td colspan="4" class="empty">Loading local files…</td></tr></tbody></table></div>
+          <div class="panel-footnote">Only regular files are indexed. Symbolic links are skipped to prevent sharing files outside the storage root.</div>
+        </section>
+
+        <section class="panel pairing-panel">
+          <div class="eyebrow">DEVICE CONNECTION</div><h2>Pair a device</h2><p>Pairing creates a trust relationship. It does not automatically grant access to any file.</p>
+          <div class="subpanel">
+            <div class="subpanel-title">1. Let another device pair with this one</div>
+            <button class="button button-primary full" id="generate-invite">Generate one-time pairing code</button>
+            <div id="invite-result" class="invite-result hidden"></div>
+            <p class="hint">Give this code to the device that will connect to this node. It expires after 10 minutes.</p>
+          </div>
+          <div class="subpanel">
+            <div class="subpanel-title">2. Connect this device to another node</div>
+            <label for="peer-url">Other device URL</label><input id="peer-url" type="url" placeholder="http://192.168.1.20:8787" autocomplete="url">
+            <label for="pairing-code">One-time pairing code</label><input id="pairing-code" type="text" placeholder="16-character code" maxlength="16" autocapitalize="characters">
+            <button class="button button-primary full" id="pair-device">Pair with device</button>
+          </div>
+        </section>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading"><div><div class="eyebrow">TRUST RELATIONSHIPS</div><h2>Devices</h2><p>Incoming means that device can request files shared by this node. Outgoing means this node can request files shared to it.</p></div><button class="button button-secondary" id="refresh-peers">Refresh</button></div>
+        <div id="peers-list" class="device-list"><div class="empty">No paired devices yet.</div></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading"><div><div class="eyebrow">FILE PERMISSIONS</div><h2>Share a local file</h2><p>Choose an incoming paired device and grant access to a file inside this node's storage root.</p></div></div>
+        <form id="share-form" class="form-row">
+          <div class="field-grow"><label for="share-path">Relative file path</label><input id="share-path" required placeholder="documents/report.pdf"></div>
+          <div><label for="share-peer">Receiving device</label><select id="share-peer" required><option value="">Pair a device first</option></select></div>
+          <div><label for="share-permission">Permission</label><select id="share-permission"><option value="VIEW">View + download</option><option value="MODIFY">View + download + delete original</option></select></div>
+          <button class="button button-primary form-button" type="submit">Grant access</button>
+        </form>
+        <div class="permission-note"><strong>VIEW</strong> allows listing and downloading. <strong>MODIFY</strong> additionally allows the receiving device to delete the original file on this device. Deletion affects every share of that original.</div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading"><div><div class="eyebrow">ACCESS CONTROL</div><h2>Shared by this device</h2><p>Revoke a grant at any time. Revoking access does not delete the original file.</p></div><button class="button button-secondary" id="refresh-grants">Refresh</button></div>
+        <div class="table-wrap"><table><thead><tr><th>FILE</th><th>DEVICE</th><th>PERMISSION</th><th>CREATED</th><th></th></tr></thead><tbody id="grants-body"><tr><td colspan="5" class="empty">No active shares.</td></tr></tbody></table></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading"><div><div class="eyebrow">REMOTE FILES</div><h2>Files shared with this device</h2><p>Remote files remain on the device that owns them. Downloads are streamed from that peer to this node.</p></div></div>
+        <div class="form-row remote-toolbar"><div><label for="remote-peer">Source device</label><select id="remote-peer"><option value="">No outgoing peers</option></select></div><button class="button button-primary form-button" id="load-remote">Load remote shares</button></div>
+        <div class="table-wrap"><table><thead><tr><th>FILE</th><th>SIZE</th><th>ACCESS</th><th></th></tr></thead><tbody id="remote-body"><tr><td colspan="4" class="empty">Choose a source device to view its shared files.</td></tr></tbody></table></div>
+      </section>
+
+      <footer><span>PersonalCloud MVP · peer-to-peer file access</span><span id="footer-node"></span></footer>
+    </main>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

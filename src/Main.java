@@ -11,4 +11,6 @@ void main() {
         IO.println(file1.getFilePath());
         IO.println(file1.getFileSize());
     }
+    FileIndexer file = new FileIndexer(Path.of("/home/monil/Documents"));
+    file.checkDirectory();
 }

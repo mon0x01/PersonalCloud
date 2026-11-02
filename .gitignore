@@ -33,3 +33,9 @@ bin/
 .idea/
 
 *.iml
+/build/
+/data/
+/data-*/
+/storage/
+/storage-*/
+*.log
