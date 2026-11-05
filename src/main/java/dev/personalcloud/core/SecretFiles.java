@@ -37,21 +37,22 @@ public final class SecretFiles {
         return value;
     }
 
+    public static void restrictDirectory(Path path) {
+        try {
+            Files.setPosixFilePermissions(path, Set.of(
+                    PosixFilePermission.OWNER_READ,
+                    PosixFilePermission.OWNER_WRITE,
+                    PosixFilePermission.OWNER_EXECUTE));
+        } catch (Exception ignored) {
+            // POSIX permissions are not available on every operating system.
+        }
+    }
+
     public static void restrict(Path path) {
         try {
-            if (Files.isSymbolicLink(path)) return;
-
-            Set<PosixFilePermission> permissions =
-                    Files.isDirectory(path, java.nio.file.LinkOption.NOFOLLOW_LINKS)
-                    ? Set.of(
-                        PosixFilePermission.OWNER_READ,
-                        PosixFilePermission.OWNER_WRITE,
-                        PosixFilePermission.OWNER_EXECUTE)
-                    : Set.of(
-                        PosixFilePermission.OWNER_READ,
-                        PosixFilePermission.OWNER_WRITE);
-
-            Files.setPosixFilePermissions(path, permissions);
+            Files.setPosixFilePermissions(path, Set.of(
+                    PosixFilePermission.OWNER_READ,
+                    PosixFilePermission.OWNER_WRITE));
         } catch (Exception ignored) {
             // POSIX permissions are not available on every operating system.
         }

@@ -1,44 +1,52 @@
 package dev.personalcloud;
 
+import dev.personalcloud.cli.PersonalCloudCli;
 import dev.personalcloud.core.AppConfig;
-import dev.personalcloud.core.FileService;
-import dev.personalcloud.core.GrantService;
-import dev.personalcloud.core.PeerService;
-import dev.personalcloud.core.StateStore;
-import dev.personalcloud.core.VersionService;
-import dev.personalcloud.web.PersonalCloudServer;
+import dev.personalcloud.runtime.PersonalCloudNode;
 
+import java.util.Arrays;
+import java.util.concurrent.CountDownLatch;
+
+/** Headless entry point. PersonalCloud is a node service, not a browser dashboard. */
 public final class PersonalCloudApplication {
-    public static void main(String[] args) throws Exception {
-        AppConfig config = AppConfig.load();
-        StateStore store = new StateStore(config.dataDirectory());
-        FileService files = new FileService(config.storageRoot());
-        PeerService peers = new PeerService(store, config);
-        VersionService versions = new VersionService(config.dataDirectory(), files);
-        GrantService grants = new GrantService(store, files, peers, versions, config.maxUploadBytes());
-        PersonalCloudServer server = new PersonalCloudServer(config, store, files, peers, grants, versions);
-        server.start();
+    private PersonalCloudApplication() { }
 
+    public static void main(String[] args) throws Exception {
+        if (args != null && args.length > 0 && "local".equals(args[0])) {
+            PersonalCloudCli.run(Arrays.copyOfRange(args, 1, args.length));
+            return;
+        }
+        if (args != null && args.length > 0 && ("help".equals(args[0]) || "--help".equals(args[0]))) {
+            printUsage();
+            return;
+        }
+
+        AppConfig config = AppConfig.load();
+        PersonalCloudNode node = new PersonalCloudNode(config);
+        node.start();
+        Runtime.getRuntime().addShutdownHook(new Thread(node::close, "personalcloud-shutdown"));
+
+        String scheme = config.tlsKeystore() == null ? "http" : "https";
         System.out.println();
         System.out.println("PersonalCloud node is running");
         System.out.println("--------------------------------");
-        System.out.println("Device       : " + config.nodeName());
-        System.out.println("Node ID      : " + config.nodeId());
-        System.out.println("Dashboard    : " + (config.tlsKeystore() == null ? "http" : "https") + "://localhost:" + config.port());
-        System.out.println("Bind address : " + config.bindAddress());
-        System.out.println("Storage root : " + files.root());
-        System.out.println("Username     : admin");
-        if (config.adminPasswordGenerated()) {
-            System.out.println("First-run password: " + config.firstRunPassword());
-            System.out.println("Save this password now. Only a salted password hash is stored on disk.");
-        } else {
-            System.out.println("Password     : salted hash stored in " + config.dataDirectory().resolve("admin-password.hash"));
-        }
-        System.out.println();
-        System.out.println(config.tlsKeystore() == null
-                ? "Security: loopback-only HTTP is active. Configure TLS before network binding."
-                : "Security: HTTPS is active. Use a trusted certificate and protect the keystore password.");
+        System.out.println("Device        : " + config.nodeName());
+        System.out.println("Node ID       : " + config.nodeId());
+        System.out.println("Peer endpoint : " + scheme + "://" + config.bindAddress() + ":" + config.port());
+        System.out.println("Managed files : " + config.storageRoot());
+        System.out.println("Local control : " + node.controlSocket());
+        System.out.println("Interface     : OS-native integration / Java local CLI");
+        System.out.println("Browser UI    : not included in this scoped build");
         System.out.println("Press Ctrl+C to stop.");
-        Runtime.getRuntime().addShutdownHook(new Thread(server::stop));
+
+        new CountDownLatch(1).await();
+    }
+
+    private static void printUsage() {
+        System.out.println("PersonalCloud node service\n"
+                + "  java -jar build/personalcloud.jar                 Start this device as a node\n"
+                + "  java -jar build/personalcloud.jar local help      Local Java control CLI\n"
+                + "\nThe peer endpoint serves only the PersonalCloud peer protocol.\n"
+                + "The local CLI communicates through an owner-only Unix-domain socket.");
     }
 }

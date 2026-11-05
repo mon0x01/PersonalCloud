@@ -9,6 +9,11 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.security.MessageDigest;
+import java.util.HexFormat;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -84,6 +89,53 @@ public final class RemotePeerClient {
         String sha256 = response.headers().firstValue("X-Content-SHA256").orElse(null);
         return new DownloadResponse(response.statusCode(), contentLength, contentRange, sha256, response.body());
     }
+
+    /** Downloads a peer-owned file atomically and verifies the peer-provided SHA-256 digest. */
+    public DownloadResult downloadShare(Map<String, String> peer, String shareId, Path destination) throws Exception {
+        Path requested = destination.toAbsolutePath().normalize();
+        Path requestedParent = requested.getParent();
+        if (requestedParent == null || requested.getFileName() == null) throw new IllegalArgumentException("Download destination must name a file inside a directory.");
+        Files.createDirectories(requestedParent);
+        Path parent = requestedParent.toRealPath();
+        Path target = parent.resolve(requested.getFileName().toString());
+        if (Files.exists(target, java.nio.file.LinkOption.NOFOLLOW_LINKS)) throw new IllegalArgumentException("Download destination already exists; refusing to overwrite it.");
+
+        DownloadResponse response = openShare(peer, shareId, null);
+        Path temporary = parent.resolve("." + target.getFileName() + ".pc-part-" + java.util.UUID.randomUUID());
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        long total = 0;
+        boolean committed = false;
+        try (InputStream input = response.body();
+             java.io.OutputStream output = Files.newOutputStream(temporary, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
+            byte[] buffer = new byte[64 * 1024];
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                total = Math.addExact(total, read);
+                if (total > 100L * 1024 * 1024 * 1024) throw new java.io.IOException("Remote file exceeds the 100 GiB download safety limit.");
+                digest.update(buffer, 0, read);
+                output.write(buffer, 0, read);
+            }
+            output.flush();
+            if (response.contentLength() >= 0 && total != response.contentLength()) {
+                throw new java.io.IOException("Downloaded byte count does not match the remote Content-Length.");
+            }
+            String actual = HexFormat.of().formatHex(digest.digest());
+            String expected = response.sha256();
+            if (expected == null || !MessageDigest.isEqual(expected.toLowerCase(java.util.Locale.ROOT)
+                    .getBytes(StandardCharsets.US_ASCII), actual.getBytes(StandardCharsets.US_ASCII))) {
+                throw new SecurityException("Remote file SHA-256 verification failed.");
+            }
+            // Atomic create-if-absent publication; fail closed rather than risk replacement.
+            Files.createLink(target, temporary);
+            Files.delete(temporary);
+            committed = true;
+            return new DownloadResult(target, total, actual);
+        } finally {
+            if (!committed) Files.deleteIfExists(temporary);
+        }
+    }
+
+    public record DownloadResult(Path path, long sizeBytes, String sha256) { }
 
     public InputStream openFolderArchive(Map<String, String> peer, String grantId) throws Exception {
         HttpRequest request = authorized(peer, "/node/shares/" + encodePath(grantId) + "/archive")

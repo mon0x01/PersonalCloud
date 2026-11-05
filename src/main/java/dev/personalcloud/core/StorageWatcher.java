@@ -13,7 +13,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
-/** Watches the owned storage tree. Revision changes let browser clients refresh without rescanning constantly. */
+/** Watches the owned storage tree. Revision changes let native adapters detect storage changes without rescanning constantly. */
 public final class StorageWatcher implements AutoCloseable {
     private final Path root;
     private final WatchService service;

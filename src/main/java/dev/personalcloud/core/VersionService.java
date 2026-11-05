@@ -28,7 +28,7 @@ public final class VersionService {
         this.root = dataDirectory.resolve("versions").toAbsolutePath().normalize();
         this.files = files;
         Files.createDirectories(root);
-        SecretFiles.restrict(root);
+        SecretFiles.restrictDirectory(root);
         // Remove incomplete temporary artifacts left by a process or power failure.
         try (var paths = Files.list(root)) {
             for (Path path : paths.filter(p -> p.getFileName().toString().endsWith(".tmp")).toList()) {
@@ -56,7 +56,7 @@ public final class VersionService {
             byte[] buffer = new byte[128 * 1024];
             int read;
             while ((read = input.read(buffer)) != -1) {
-                copied += read;
+                copied = Math.addExact(copied, read);
                 if (copied > maxBytes) throw new IllegalArgumentException("Snapshot exceeds the configured version limit.");
                 digest.update(buffer, 0, read);
                 output.write(buffer, 0, read);

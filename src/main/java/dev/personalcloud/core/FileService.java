@@ -6,7 +6,6 @@ import java.nio.file.FileVisitOption;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Instant;
@@ -156,30 +155,26 @@ public final class FileService implements AutoCloseable {
         Path parent = target.getParent();
         Path temp = parent.resolve(".personalcloud-upload-" + java.util.UUID.randomUUID() + ".tmp");
         long total = 0;
-        boolean reserved = false;
         try {
             try (OutputStream output = Files.newOutputStream(temp, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
                 byte[] buffer = new byte[64 * 1024];
                 int count;
                 while ((count = input.read(buffer)) != -1) {
-                    total += count;
+                    total = Math.addExact(total, count);
                     if (total > maxBytes) throw new IllegalArgumentException("Upload exceeds the configured maximum of " + maxBytes + " bytes.");
                     output.write(buffer, 0, count);
                 }
                 output.flush();
             }
-            // Reserve the final name atomically so concurrent uploads cannot silently overwrite one another.
-            Files.createFile(target);
-            reserved = true;
-            try {
-                Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-            } catch (java.nio.file.AtomicMoveNotSupportedException unsupported) {
-                Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
-            }
+            // Publish the completed inode atomically without replacing an existing destination.
+            // Files.move(temp, target) is not sufficient here: on some providers its existence
+            // check and rename can race, allowing a competing writer to replace the winner.
+            // The temporary file is in the same directory, so hard-link creation is an atomic
+            // create-if-absent operation. If the filesystem does not support hard links, fail
+            // closed; never fall back to an overwrite-prone move.
+            Files.createLink(target, temp);
+            Files.delete(temp);
             return total;
-        } catch (Exception error) {
-            if (reserved) Files.deleteIfExists(target);
-            throw error;
         } finally {
             Files.deleteIfExists(temp);
         }
