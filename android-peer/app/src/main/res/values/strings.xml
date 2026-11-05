@@ -1,0 +1,6 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="status_stopping">Status: stopping node</string>
+    <string name="default_permission_download">DOWNLOAD</string>
+    <string name="status_format">Status: %1$s</string>
+</resources>
