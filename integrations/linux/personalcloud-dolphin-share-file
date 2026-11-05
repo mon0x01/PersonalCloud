@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ITEM="${1:-}"
+if [[ -z "$ITEM" ]]; then
+  echo "Usage: personalcloud-dolphin-share-file <local-file>" >&2
+  exit 2
+fi
+if [[ "$ITEM" != /* ]]; then ITEM="$PWD/$ITEM"; fi
+exec konsole --separate --hold -e bash -c '
+set -Eeuo pipefail
+ROOT="$1"
+ITEM="$2"
+if [[ -L "$ITEM" || ! -f "$ITEM" ]]; then
+  echo "Select a regular file. Symbolic links and directories are not accepted by this action."
+  exit 2
+fi
+for command in kdialog jq; do
+  if ! command -v "$command" >/dev/null 2>&1; then
+    echo "The Dolphin reference-sharing action requires KDE kdialog and jq."
+    exit 2
+  fi
+done
+CLI="$ROOT/integrations/linux/personalcloudctl"
+LOCATED="$("$CLI" references locate "$ITEM")"
+REFERENCE_ID="$(jq -er ".referenceId" <<< "$LOCATED")"
+RELATIVE_PATH="$(jq -er ".relativePath" <<< "$LOCATED")"
+FILE_NAME="$(jq -er ".fileName" <<< "$LOCATED")"
+MEMBERS="$("$CLI" network members)"
+mapfile -t ROWS < <(printf "%s\n" "$MEMBERS" | jq -r "select((.status // \"\") == \"ACTIVE\" and (.online == true)) | [.nodeId, .nodeName] | @tsv")
+if (( ${#ROWS[@]} == 0 )); then
+  echo "No online active PersonalCloud member is available."
+  exit 2
+fi
+OPTIONS=()
+for row in "${ROWS[@]}"; do
+  IFS=$'"'"'\t'"'"' read -r node_id node_name <<< "$row"
+  OPTIONS+=("$node_id" "$node_name")
+done
+DESTINATION="$(kdialog --menu "Choose who can access $FILE_NAME" "${OPTIONS[@]}")" || exit 0
+[[ -n "$DESTINATION" ]] || exit 0
+DEST_NAME="$(printf "%s\n" "$MEMBERS" | jq -r --arg id "$DESTINATION" "select(.nodeId == \$id) | .nodeName" | head -n1)"
+PERMISSION="$(kdialog --menu "Choose the permission for $DEST_NAME" \
+  "DOWNLOAD" "Allow download only" \
+  "DOWNLOAD+DELETE" "Allow download and deletion")" || exit 0
+case "$PERMISSION" in DOWNLOAD|DOWNLOAD+DELETE) ;; *) echo "Invalid permission selection."; exit 2 ;; esac
+"$CLI" reference-grants create "$DESTINATION" "$REFERENCE_ID" "$RELATIVE_PATH" "$PERMISSION"
+echo
+echo "Shared by reference: no copy was made."
+echo "File: $FILE_NAME"
+echo "Permission: $PERMISSION"
+' personalcloud-share-file "$ROOT" "$ITEM"

@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ITEM="${1:-}"
+if [[ -z "$ITEM" ]]; then
+  echo "Usage: personalcloud-dolphin-place-file <local-file>" >&2
+  exit 2
+fi
+exec konsole --separate --hold -e bash -c '
+set -Eeuo pipefail
+ROOT="$1"
+ITEM="$2"
+if [[ -L "$ITEM" || ! -f "$ITEM" ]]; then
+  echo "Select a regular file. Symbolic links and directories are not accepted by this action."
+  exit 2
+fi
+ITEM="$(realpath -e -- "$ITEM")"
+CLI="$ROOT/integrations/linux/personalcloudctl"
+for command in kdialog jq; do
+  if ! command -v "$command" >/dev/null 2>&1; then
+    echo "The Dolphin file-placement action requires KDE kdialog and jq."
+    exit 2
+  fi
+done
+MEMBERS="$("$CLI" network members)"
+mapfile -t ROWS < <(printf "%s\n" "$MEMBERS" | jq -r "select((.status // \"\") == \"ACTIVE\" and (.online == true)) | [.nodeId, .nodeName] | @tsv")
+if (( ${#ROWS[@]} == 0 )); then
+  echo "No online active PersonalCloud destination is available."
+  exit 2
+fi
+OPTIONS=()
+for row in "${ROWS[@]}"; do
+  IFS=$'"'"'\t'"'"' read -r node_id node_name <<< "$row"
+  OPTIONS+=("$node_id" "$node_name")
+done
+DESTINATION="$(kdialog --menu "Choose the PersonalCloud device that will own this file" "${OPTIONS[@]}")" || exit 0
+[[ -n "$DESTINATION" ]] || exit 0
+DEST_NAME="$(printf "%s\n" "$MEMBERS" | jq -r --arg id "$DESTINATION" "select(.nodeId == \$id) | .nodeName" | head -n1)"
+DEFAULT_PATH="$(basename -- "$ITEM")"
+REMOTE_PATH="$(kdialog --inputbox "Destination path on $DEST_NAME (relative to its managed storage)" "$DEFAULT_PATH")" || exit 0
+if [[ -z "$REMOTE_PATH" ]]; then echo "Destination path cannot be empty."; exit 2; fi
+"$CLI" managed place "$DESTINATION" "$ITEM" "$REMOTE_PATH"
+echo
+echo "The destination verified the whole-file size and SHA-256 before commit."
+' personalcloud-place-file "$ROOT" "$ITEM"

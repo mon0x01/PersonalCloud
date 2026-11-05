@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+if [[ ! -f "$ROOT/build/personalcloud.jar" ]]; then
+  "$ROOT/build.sh"
+fi
+exec java -cp "$ROOT/build/personalcloud.jar" dev.personalcloud.cli.PersonalCloudCli "$@"

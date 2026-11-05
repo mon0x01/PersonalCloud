@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ITEM="${1:-}"
+if [[ -z "$ITEM" ]]; then
+  echo "Usage: personalcloud-dolphin-reference <local-directory>" >&2
+  exit 2
+fi
+
+# KDE launches service-menu commands without an interactive terminal. Open Konsole so the
+# registration result and any validation error are visible to the user.
+exec konsole --separate --hold -e bash -c '
+set -Eeuo pipefail
+ROOT="$1"
+ITEM="$2"
+if [[ -L "$ITEM" ]]; then
+  echo "PersonalCloud does not register symbolic links as storage roots."
+  exit 2
+fi
+if [[ ! -d "$ITEM" ]]; then
+  echo "Select a directory. This action does not register individual files."
+  exit 2
+fi
+ITEM="$(realpath -e -- "$ITEM")"
+NAME="${ITEM%/}"
+NAME="${NAME##*/}"
+if [[ -z "$NAME" ]]; then NAME="Home"; fi
+"$ROOT/integrations/linux/personalcloudctl" references add "$NAME" "$ITEM"
+echo
+echo "The directory is now referenced in place. Its contents were not copied or moved."
+' personalcloud-reference "$ROOT" "$ITEM"

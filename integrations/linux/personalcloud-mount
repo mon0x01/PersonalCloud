@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+JAR="$ROOT/integrations/linux/fuse/target/personalcloud-linux-fuse-0.2.0.jar"
+if [[ -z "${PERSONALCLOUD_CONTROL_SOCKET:-}" && -z "${PERSONALCLOUD_DATA_DIR:-}" ]]; then
+  export PERSONALCLOUD_DATA_DIR="$ROOT/data"
+fi
+if [[ ! -f "$JAR" ]]; then
+  echo "PersonalCloud FUSE adapter is not built. Run: $ROOT/integrations/linux/build-fuse.sh" >&2
+  exit 2
+fi
+exec java -Dfile.encoding=UTF-8 -jar "$JAR" "$@"

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Service
+X-KDE-ServiceTypes=KonqPopupMenu/Plugin;
+MimeType=all/allfiles;
+Actions=personalcloudShareFile;
+X-KDE-Priority=TopLevel
+
+[Desktop Action personalcloudShareFile]
+Name=Share through PersonalCloud (no copy)
+Icon=folder-sharing
