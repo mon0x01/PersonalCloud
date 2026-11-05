@@ -1,74 +1,111 @@
-# PersonalCloud V1 architecture
+# PersonalCloud architecture
 
-## 1. Product invariants
+## 1. System model
 
-- A PersonalCloud node owns the files under its configured storage root.
-- Original content is read from and retained on the owner node unless an authorized `MODIFY` operation deletes it.
-- Pairing establishes peer trust; an explicit per-peer file/folder grant is still required.
-- `VIEW` permits list/download only. `MODIFY` additionally permits remote deletion of the owner's original.
-- A remote download is a copy. Revoking a grant cannot retract data already downloaded by a peer.
-- No central service stores original files. This release has no rendezvous or relay service.
+PersonalCloud is a private, direct-connected network of personally operated devices. Every enrolled device is an independent node with its own identity, local data, managed-storage root and peer HTTPS endpoint. There is no central file-content service or relay. A device that owns a file is authoritative for that file; when it is offline, the content is unavailable even if cached metadata remains visible.
 
-## 2. Runtime components
+Each node has three boundaries:
+
+1. **Local control plane** — owner-only Java CLI over a Unix-domain socket.
+2. **Peer control/data plane** — authenticated HTTPS/JSON protocol for membership, presence, catalogue, references and managed files.
+3. **Local storage plane** — existing directories referenced in place plus a separate PersonalCloud-managed storage root.
+
+## 2. Product invariants
+
+- One physical owner per file in the initial product model.
+- Whole-file placement on one manually selected destination; no block striping.
+- Existing directories/files are referenced in place and are never copied or moved during registration.
+- Referencing and authorization are separate operations.
+- Reference grants use `DOWNLOAD` or `DOWNLOAD+DELETE`.
+- Delete-capable reference grants create a verified owner-side recovery snapshot before deletion where the backing provider supports it.
+- Offline nodes are unavailable; stale metadata is never represented as live content.
+- Peer traffic uses authenticated TLS and member-signed requests.
+- No relay, replication, automatic synchronization, public discovery or central file storage.
+- No mandatory application-level encryption of file contents at rest; host OS encryption is preferred.
+- The principal UX is native OS integration rather than a browser dashboard.
+- Application and integration code is Java; shell is used only for launchers and OS packaging glue.
+
+## 3. Desktop Java node
+
+### `PersonalCloudApplication` and `PersonalCloudNode`
+
+The process entry point builds and owns a node's runtime dependency graph, loads persistent state, starts the peer endpoint, local-control socket and periodic catalogue synchronization, and closes services on shutdown.
+
+### `NetworkMembershipService` and `DeviceIdentity`
+
+Each node creates an Ed25519 signing key pair. A network bootstrap stores a PBKDF2-HMAC-SHA-256 verifier, a root membership certificate and the local member record. Enrollment uses a short-lived challenge and a password proof; the password itself is not sent to the approving device. An active member explicitly approves or rejects the pending device. A signed certificate chain links member identities to the network root.
+
+Authenticated peer requests sign the HTTP method, raw path, timestamp, nonce and body digest. Receivers validate the member certificate chain, network identity, timestamp, signature and replay nonce before dispatching the request. Revoked identities are rejected.
+
+### `DeviceCatalogueService` and `NetworkPeerClient`
+
+Nodes exchange signed member catalogues and direct presence/heartbeat requests. The catalogue tracks the endpoint and online/offline state of members. Offline members retain cached metadata, but remote content reads fail as unavailable.
+
+### `PeerProtocolServer`
+
+The JDK HTTP server module (`jdk.httpserver`) exposes the node's HTTPS/JSON peer API. It supports enrollment, membership, presence, heartbeat, remote reference operations and managed-file operations. The browser dashboard and network-exposed local administration API are not part of this build. A transitional invitation/token API remains for compatibility with the previous Android peer protocol.
+
+### `LocalControlServer`, `LocalControlClient` and `PersonalCloudCli`
+
+The owner-only Unix-domain socket separates local administration from the peer listener. The socket is created with owner-only permissions. The Java CLI provides local node, membership, reference, grant, browse/search/stat/download and managed-placement operations.
+
+## 4. Storage model
+
+### Referenced storage
+
+`ReferenceStorageService` registers selected directories by canonical path and stores metadata only. The original files remain at their existing paths. Symbolic links, special files, traversal paths and unsafe roots are rejected. `ReferenceGrantService` binds a member identity to a selected reference and permission level. Remote operations include root listing, folder browse, stat, search, bounded byte-range reads, checksum-verified downloads and authorized deletion.
+
+### Managed storage
+
+`ManagedStorageService` stores whole files below a node-local managed root. A source node chooses the destination member and streams the complete file directly over authenticated HTTPS. The receiver stages the bytes, enforces size/path limits, verifies SHA-256 and commits without overwriting an existing destination. The destination remains the physical owner.
+
+### Recovery and monitoring
+
+`StorageWatcher` uses Java NIO `WatchService` to observe registered storage changes. `VersionService` and `ReferenceVersionService` keep bounded owner-local snapshots and verify content digests during restoration. Android SAF-backed references maintain their own URI-permission-aware bounded recovery store.
+
+### Virtual filesystem model
+
+`ReferenceFileSystemModel` and `ReadOnlyVirtualFilesystem` expose a read-only namespace:
 
 ```text
-Browser (HTML/CSS/JS)
-  | session cookie / same-origin API
-  v
-PersonalCloudServer (JDK HttpServer or HttpsServer)
-  |-- AppConfig / PasswordService / SessionManager / TotpService
-  |-- FileService / FileIndexer / StorageWatcher / VersionService
-  |-- GrantService / PeerService / RemotePeerClient
-  |-- StateStore / AuditLog / SecurityMonitor
-  v
-Owner local storage + private node data
-
-Node B -- HTTPS + bearer token --> Node A
-  file bytes are streamed from A's storage, through B, to B's requesting client
+Devices/<device>/References/...
+Devices/<device>/Distributed-Storage/...
 ```
 
-The Java server serves dashboard assets and JSON/file APIs. The browser executes HTML, CSS, and JavaScript; Java does not replace those browser technologies.
+The model handles canonical path lookup, metadata, offline state and bounded random-access reads. Native adapters must delegate to this boundary instead of implementing path authorization independently.
 
-## 3. Pairing and trust direction
+## 5. Linux integration
 
-Pairing is directional. B submits A's short-lived single-use code to A. A stores a hash of B's incoming bearer token and returns the raw token once; B stores A's endpoint and token encrypted under B's local AES-256-GCM vault key. This creates the trust direction required for B to call A. Pairing in the reverse direction is a separate operation.
+The optional Java JNR-FUSE2 adapter projects the virtual filesystem into a read-only mount. It explicitly rejects data and metadata mutation callbacks and requests `ro,nodev,nosuid,noexec` mount flags. KDE Dolphin KIO service-menu actions register a directory in place, send a whole file to a selected online member, or create an exact-file reference grant without copying the file. The adapter source and shell integration checks exist; the optional Maven/JNR-FUSE build and real kernel mount still require Linux FUSE2 dependencies and platform validation.
 
-Sharing then works from A to B only when A has incoming trust for B. A creates a grant with peer ID, relative path, and `VIEW` or `MODIFY`. Requests authenticate the peer token and resolve the actual peer ID; the server does not trust a peer-supplied node ID by itself. Opaque share identifiers and folder-descendant checks constrain subsequent requests.
+## 6. Android integration
 
-## 4. Authentication and browser sessions
+The Android peer-core is a Java 17-compatible module that implements the membership, signed-request, catalogue, reference and managed-storage protocol. It is exercised by headless tests against the desktop node.
 
-Each node has one administrator account. Passwords are verified using salted PBKDF2-HMAC-SHA256 hashes. When MFA is off, Basic authentication remains available for local automation and CLI integration; the dashboard creates an in-memory session cookie after login. Enabling MFA disables Basic authentication for protected APIs and requires password plus a current RFC 6238 TOTP or unused recovery code.
+The Android app source includes:
+- A foreground peer service with periodic catalogue/heartbeat synchronization.
+- AndroidKeyStore-backed AES-GCM protection for app state.
+- Operational controls for network creation/join, approval/rejection, member listing/revocation and owner recovery.
+- `DocumentsProvider` integration for app-managed files, owner-local SAF references and remote member content.
+- Storage Access Framework folder-tree and single-document references that persist URI permissions and do not copy original bytes.
+- Seekable proxy file descriptors backed by authenticated byte-range reads for remote documents.
 
-The TOTP seed is encrypted using the local token vault key. Ten recovery codes are shown once and only their hashes are persisted. Accepted TOTP time steps are stored to reject reuse; recovery codes are consumed once. Browser sessions contain random 256-bit opaque values, only their SHA-256 hashes are kept in memory, sessions expire after 12 hours, and a node restart invalidates them. The manager caps active sessions at 64.
+Network membership requires Android 13/API 33 or newer for the platform Ed25519 provider; older supported Android versions retain legacy peer compatibility. The Android framework module still needs Android SDK/Gradle compilation and physical-device validation. The final visual design remains deferred pending product-owner UX feedback.
 
-## 5. File and folder model
+## 7. Security boundaries
 
-`FileService` is the filesystem trust boundary. It validates relative paths, root containment, no-follow access, symlink escapes, duplicate destinations, and upload size. It supports file/folder listing, upload, folder creation, file/folder move, small plain-text previews, streamed downloads, and streamed folder ZIPs. ZIP entry names are sanitized independently of the host OS path separator.
+- Non-loopback peer traffic uses TLS with a matching certificate SAN.
+- Network membership is explicit and approval-gated.
+- Every node has its own signing key; private keys are not shared.
+- Signed requests bind method, path, timestamp, nonce and body digest.
+- Local administration is not exposed through the peer listener.
+- File operations enforce member grants, canonical paths, no-symlink rules and configured byte limits.
+- Downloads and managed uploads verify size and SHA-256 before finalization.
+- Deletion of shared referenced originals is permission-gated and snapshot-backed where supported.
 
-Directory uploads preserve relative paths when the browser supplies `webkitRelativePath`; each file is uploaded as its own bounded request, so a mid-operation failure can result in partial success. Folder ZIP downloads are streamed and sanitized but are not resumable. File downloads support a single byte range and include a SHA-256 response header.
+## 8. Known engineering limits
 
-The `StorageWatcher` recursively registers real directories without following symlinks. It increments a revision when file/directory changes are observed, including newly created subdirectories. The browser polls a tiny status endpoint every five seconds and runs full file/folder refreshes only when the revision changes.
-
-## 6. Permissions, deletion, and recovery
-
-A file or folder grant is scoped to a single peer. A folder grant exposes descendant files and a ZIP download. `VIEW` cannot call remote deletion. `MODIFY` can delete an individual original file, but the owner creates and persists a local recovery snapshot first. Local file delete uses the same snapshot-before-delete order. The snapshot store is inside the private data directory, outside the indexed storage root, and never exposed to peers.
-
-Each snapshot has SHA-256 metadata. Restore verifies the content and refuses to overwrite a destination. Retention is bounded to 20 snapshots per path, 500 snapshots total, and 10 GiB aggregate content. A file larger than the configured maximum upload size cannot be snapshotted, so the delete request is cancelled rather than silently deleting unrecoverable content.
-
-Moves rewrite the affected grant paths while retaining grant IDs and permissions. Revocation prevents subsequent remote access but does not remove already downloaded peer copies.
-
-## 7. State and secrets
-
-The data directory contains node identity, salted admin hash, `vault.key`, encrypted outgoing peer tokens, grants, pairing records, MFA state/recovery-code hashes, state backup, recovery blobs/metadata, and audit logs. It must not overlap the owned storage root. The data directory should be private to the operating-system user. A full backup must keep the state and vault key together. If the vault key is lost, encrypted outgoing tokens cannot be restored and those outbound pairings must be recreated. MFA recovery codes remain available if the encrypted TOTP seed cannot be decrypted.
-
-`StateStore` is a properties-backed single-node state file with atomic replacement and a last-known-good backup. It is not a transactional multi-process database. Run one PersonalCloud process per data directory.
-
-## 8. Network and threat boundaries
-
-The listener defaults to loopback HTTP. Any non-loopback listener requires a PKCS#12 TLS keystore. Peer HTTPS calls use certificate and hostname verification; a custom trust store can be configured. HSTS applies to HTTPS responses. Use a trusted LAN or VPN and firewall controls.
-
-TLS is transport encryption, not application-level E2EE. Both peer endpoints terminate TLS and may read the content. There is no NAT traversal, STUN/ICE/TURN, rendezvous, relay, or automatic discovery. Peers must have mutually reachable HTTPS endpoints. No third-party infrastructure is provisioned by this project.
-
-## 9. Deferred architecture
-
-A future cross-network design should separate candidate exchange from data custody: rendezvous should exchange peer connection details only, an ICE/STUN path should attempt direct connectivity, and a blind relay may forward encrypted packets when direct connectivity fails. File-content E2EE needs device-held keys, identity verification, rotation, and revocation semantics before it is implemented. Android should be a separate peer agent implementing the same explicit grant semantics while respecting mobile OS storage/background constraints. Background sync needs conflict and offline-queue semantics separate from the current explicit file access model.
+- Android app framework source has not yet been built with the Android SDK/Gradle in this development environment.
+- The JNR-FUSE module compiled successfully against its external Maven dependency on Arch Linux on 2026-11-04. A real Linux-kernel mount and callback exercise remain unverified.
+- Transfer resume after abrupt process/device failure, long-duration/concurrency testing, performance profiling, a security audit, NAT/CGNAT diagnostics and final native UX refinement remain production-readiness work.
+- Direct connectivity can fail behind CGNAT or restrictive firewalls; no relay fallback is provided.

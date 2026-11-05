@@ -1,9 +1,14 @@
-# Build output
+# Java build/test output
 /build/
 /out/
 *.class
 
-# PersonalCloud runtime data and owned files
+# Android Gradle output
+android-peer/.gradle/
+android-peer/**/build/
+android-peer/local.properties
+
+# Runtime identity, state and user data
 /data/
 /data-*/
 /personalcloud-data/
@@ -20,10 +25,8 @@
 # Logs and transient files
 *.log
 *.tmp
-__pycache__/
-.venv/
 
-# Local secrets and test certificates
+# TLS identities and private material
 *.key
 *.pem
 *.crt
@@ -32,3 +35,11 @@ __pycache__/
 *.jks
 *.keystore
 *.truststore
+
+# Nested Maven build output
+**/target/
+
+# Nested Gradle caches
+**/.gradle/
+__pycache__/
+.venv/

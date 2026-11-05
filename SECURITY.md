@@ -1,44 +1,55 @@
-# PersonalCloud V1 security notes
+# PersonalCloud security model
 
-## Intended deployment boundary
+## Security goals
 
-PersonalCloud V1 is intended for localhost development or a trusted LAN/VPN with correctly configured TLS and firewall restrictions. It is not designed or audited for direct public-internet exposure. Do not port-forward its listener to the internet.
+PersonalCloud is designed for a private set of personally operated devices. It must prevent unrelated users from joining or accessing the network, protect peer traffic, isolate local administration from the network listener, and enforce file permissions at the owning node.
 
-## Controls present in this release
+## Current protections in source
 
-- Loopback-only HTTP by default; any non-loopback bind fails unless a PKCS#12 TLS keystore is configured.
-- TLS certificate validation and hostname checking for outbound peer HTTPS calls.
-- PBKDF2-HMAC-SHA256 password verifier; plaintext legacy password file is migrated and removed.
-- Optional RFC 6238 TOTP MFA with encrypted seed, one-use recovery codes, and replay rejection.
-- HttpOnly, SameSite=Strict browser session cookie; Secure attribute under HTTPS; 12-hour expiry; process restart invalidates sessions; at most 64 sessions.
-- MFA disables Basic authentication for protected endpoints.
-- Incoming peer tokens are hashed; outgoing peer tokens and TOTP seed are encrypted at rest with AES-256-GCM using `vault.key`.
-- Single-use pairing invitations, login/pairing throttling, same-origin checks for browser mutations, audit log.
-- Path normalization, storage-root containment, symlink rejection, bounded uploads, duplicate-destination rejection, and ZIP path sanitization.
-- Recovery snapshots before owner-side file deletion, content hash verification before restore, bounded snapshot retention.
-- State data directory is rejected when it overlaps the indexed storage root.
+- Non-loopback peer endpoints require HTTPS with a configured PKCS#12 server identity. Clients validate the peer certificate chain and hostname/IP subject alternative name.
+- Network enrollment uses a short-lived challenge and a PBKDF2-HMAC-SHA-256-derived verifier (310,000 iterations). The account password is not sent to the approving peer.
+- An existing active network member must explicitly approve or reject a joining device.
+- Desktop and Android peer-core nodes generate independent Ed25519 signing identities. Chained membership certificates bind each public key to a node and network.
+- Signed member requests bind the HTTP method, raw path, timestamp, nonce and body digest. Receivers reject invalid signatures, stale timestamps and replayed nonces. Timestamp bounds are compared directly rather than using overflow-prone absolute subtraction; regression tests cover extreme signed integer timestamps on desktop and Android peer core.
+- Member catalogues carry signed membership certificates and revocation status. Local revocation is enforced by authenticated peer operations after the updated catalogue is received.
+- The transitional pairing protocol uses high-entropy one-time invitations and token hashes; it remains for compatibility and is distinct from the approval-gated network membership model.
+- The desktop local-control socket is Unix-domain and owner-only (`0600`) inside a private data directory. It is not exposed on the network listener.
+- Properties-backed state mutations roll back their in-memory changes if the atomic persistence operation fails, preventing a running node from acting on state that was not committed to disk. This does not yet provide cross-process transactional locking or full directory-fsync crash durability.
+- Referenced roots are canonicalized. Unsafe traversal, symbolic links and special files are rejected where the storage model requires regular files/directories.
+- Managed uploads use bounded sizes, temporary staging, SHA-256 verification and no-overwrite commit. The current signed network path uses uploader-bound resumable sessions with independently hashed chunks, durable progress journals, idempotent chunk retries and a full-file digest check before publication. Downloads use unique temporary files and verify expected size and digest before finalizing. Final downloads use a same-directory move without `REPLACE_EXISTING` or `ATOMIC_MOVE`; the latter has provider-specific target-exists behavior and can violate no-overwrite expectations. Destination checks do not follow symlinks, and the final move arbitrates concurrent writers.
+- Delete-capable reference grants create owner-local recovery snapshots before deletion where the backing provider supports it. Snapshot restore verifies integrity and refuses to overwrite an existing destination.
+- The Linux virtual filesystem is read-only by construction; mutation callbacks return `EROFS` and the mount requests `ro,nodev,nosuid,noexec`.
+- Android app state uses AndroidKeyStore-backed AES-GCM. Android SAF references preserve provider URI permissions rather than copying referenced file content.
 
-## Important residual risks
+## File encryption at rest
 
-1. **TLS is not E2EE.** Each peer terminates TLS and can read transferred content. There is no file-content encryption protocol or device-key verification.
-2. **Local administrator is trusted.** A compromised OS account or administrator process can access owned files, data directory, and vault key.
-3. **One admin per node.** There are no separate users, roles, delegated administrators, or organizational policies.
-4. **Rate limits are process-local.** Login/pairing throttles reset on restart and are not a distributed abuse defense.
-5. **State store is not a database.** Properties-backed state and atomic replacement are for a single node/process, not multi-process transactional concurrency.
-6. **Downloaded copies persist.** Revocation prevents subsequent access; it cannot delete or revoke copies a peer already downloaded.
-7. **Recovery is bounded.** Snapshot retention prunes old data after its limits. Keep a separate backup of both node data and owned file storage.
-8. **No malware scanning.** Uploaded files are stored as files; content is not scanned.
-9. **No independent security audit or penetration test** has been performed.
-10. **No NAT/relay protection model.** There is no relay or rendezvous service, and arbitrary public connectivity is not supported.
+The product does not mandate application-level encryption of file contents at rest. Use host operating-system encryption (for example, LUKS, BitLocker, FileVault or Android platform encryption) when protection against powered-off device theft is required. This does not protect files from a compromised or already-unlocked operating system. Referenced files are not transformed or re-encrypted by PersonalCloud.
 
-## Operational precautions
+AndroidKeyStore-backed AES-GCM protects the Android application's stored state; it is not a claim that PersonalCloud encrypts all user file contents at rest.
 
-- Keep `PERSONALCLOUD_DATA_DIR` private to the account running the node. Never commit it, `vault.key`, passwords, certificates, or keystore passwords.
-- Keep `PERSONALCLOUD_DATA_DIR` and `PERSONALCLOUD_STORAGE_ROOT` separate and non-overlapping.
-- Back up the entire data directory and file storage independently. Keep `vault.key` with its corresponding token records.
-- Protect TLS keystores and trust stores. Use certificates whose SAN matches the exact peer URL hostname/IP.
-- Restrict network reachability with host firewalls and a trusted VPN/LAN. Do not expose the node directly to the public internet.
-- Use disposable files when testing `MODIFY`, because it deletes the owner's original after snapshot creation.
-- Save MFA recovery codes offline. They are displayed once and cannot be retrieved in plaintext later.
+## In transit and membership
 
-Report security defects privately to the maintainer before publishing exploit details.
+Peer traffic uses authenticated TLS. Never disable certificate verification or use a trust-all client. Certificate SANs must match the peer URL host/IP. Direct-only networking is an explicit product decision; there is no relay or central file-content service.
+
+Android network membership currently requires Android 13/API 33 or newer for the platform Ed25519 provider. Older supported Android API levels retain the transitional peer compatibility path; they do not receive the new signed network-membership capability.
+
+## Local state and secrets
+
+The desktop `data/` directory contains node identity, membership private keys/certificates, membership records, peer state, token-vault key, reference registrations, grants, audit logs, nonce/replay records and recovery snapshots. Keep it private and back it up securely. TLS private keys and keystore passwords must not be committed to source control or included in distributable archives.
+
+## Explicit limitations
+
+- The Android peer-core implements the signed membership and storage protocol and passes simulated desktop–Android interoperability tests. Android framework integration (foreground service, SAF, DocumentsProvider and proxy descriptors) is source-validated but still requires Android SDK/Gradle compilation and physical-device validation.
+- The Java JNR-FUSE2 adapter compiled against its Maven dependency on Arch Linux on 2026-11-04. The adapter has not yet been mounted through the Linux kernel; read-only callback behavior is covered by source-level integration checks, not live kernel testing.
+- No independent security audit has been performed. Local filesystem race resistance remains an ongoing hardening task. Receiver transfer sessions survive restart, but physical device power-loss behavior and the Android UI's transfer-ID persistence require real-device acceptance testing.
+- Direct connectivity can fail behind CGNAT or restrictive firewalls. There is deliberately no relay fallback.
+- Revocation prevents future authorized protocol operations after peers learn the updated membership catalogue; it cannot retract bytes already downloaded by a peer.
+- Application-level end-to-end file encryption and key-recovery workflows are not part of the current scope.
+
+## State-store cross-process consistency hardening — 2026-11-05
+
+- `StateStore` now takes a per-state-file JVM lock and an operating-system file lock for every read and mutation. The latest persisted properties are reloaded while holding the lock, preventing stale process snapshots from overwriting changes made by another PersonalCloud JVM.
+- State, backup and lock paths reject symbolic links. Temporary state and backup files use unique names, file contents are forced before replacement, and parent-directory fsync is attempted where the provider supports it.
+- A four-process regression test performs concurrent key and record writes and verifies a pre-existing reader observes every committed value.
+- This is serialized multi-process state access, not a general transactional database. Directory fsync is provider-dependent; power-loss durability and cross-process coordination with non-PersonalCloud tools are not guaranteed.
+- The Android peer-core test runner now compiles production and test sources with `javac --release 17 -Xlint:all`, matching the module's declared Java 17 compatibility instead of accidentally inheriting the host JDK's newer API surface.
