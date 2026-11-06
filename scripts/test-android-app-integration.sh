@@ -2,7 +2,19 @@
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+bash -n scripts/setup-android-build-tools.sh
+bash -n scripts/build-android-apk.sh
 bash -n scripts/build-install-android-peer.sh
+
+grep -Fq '4e4c464f145a7512b57d088ac6c278c03c9eea610886b35a5e0804e74eedf583' scripts/setup-android-build-tools.sh
+grep -Fq 'd725d707bfabd4dfdc958c624003b3c80accc03f7037b5122c4b1d0ef15cecab' scripts/setup-android-build-tools.sh
+grep -Fq 'platforms;android-35' scripts/setup-android-build-tools.sh
+grep -Fq 'build-tools;35.0.0' scripts/setup-android-build-tools.sh
+grep -Fq 'dump badging' scripts/build-android-apk.sh
+grep -Fq 'apksigner' scripts/build-android-apk.sh
+grep -Fq "targetSdkVersion:'35'" scripts/build-android-apk.sh
+grep -Fq 'set +o pipefail' .github/workflows/android-peer.yml
+
 
 MANIFEST=android-peer/app/src/main/AndroidManifest.xml
 SERVICE=android-peer/app/src/main/java/dev/personalcloud/android/PeerService.java
@@ -169,8 +181,8 @@ grep -Fq 'case "localrefdir"' "$PROVIDER"
 grep -Fq 'case "localreffile"' "$PROVIDER"
 
 # The app layer is source-validated here. Full SDK compilation is a separate build requirement.
-if command -v gradle >/dev/null 2>&1 && [[ -n "${ANDROID_HOME:-}${ANDROID_SDK_ROOT:-}" ]]; then
-  (cd android-peer && gradle --offline :app:assembleDebug)
+if [[ -n "${ANDROID_HOME:-}${ANDROID_SDK_ROOT:-}" || -f "$HOME/.config/personalcloud/android-build-env.sh" ]]; then
+  "$ROOT/scripts/build-android-apk.sh"
 else
   echo 'INFO: Android SDK/Gradle unavailable; app framework source was statically validated, not SDK-compiled.'
 fi

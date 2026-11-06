@@ -48,13 +48,22 @@ See:
 - JDK 21 or newer for the desktop node and Java automated tests.
 - OpenSSL and `keytool` for TLS certificate provisioning.
 - Maven and the Linux FUSE2 runtime (`libfuse.so.2`) are required only for the optional native mount adapter.
-- Android SDK and Gradle are needed to compile and assemble the Android app. The peer-core interoperability tests run with the JDK and do not compile the Android framework module.
+- The Android peer APK is built with Android SDK Platform 35, Build Tools 35.0.0, JDK 17+ and Gradle 8.9. Run `./scripts/setup-android-build-tools.sh` once to install a checksum-verified, user-local toolchain without sudo or Android Studio. The setup does not change shell startup files or install system packages. The peer-core interoperability tests run with the JDK and do not compile the Android framework module.
 
 ## Build and test
 
 ```bash
 ./build.sh
 ./scripts/test-all.sh
+
+# One-time Android build environment setup (user-local, no sudo)
+./scripts/setup-android-build-tools.sh
+
+# Build and inspect the APK without installing it
+./scripts/build-android-apk.sh
+
+# Build and install on exactly one authorized USB-connected Android device
+./scripts/build-install-android-peer.sh
 ```
 
 Start the desktop node:

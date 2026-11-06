@@ -50,4 +50,12 @@ The full suite also includes static source/manifest checks for the Android app l
 ./scripts/test-android-app-integration.sh
 ```
 
-Assembling the Android APK requires an Android SDK and Gradle. Peer-core tests do not compile the Android framework module and do not replace physical-device acceptance testing.
+Assembling the Android APK requires Android SDK Platform 35, Build Tools 35.0.0, JDK 17+ and Gradle 8.9. From the repository root, run:
+
+```bash
+./scripts/setup-android-build-tools.sh   # one-time, checksum-verified user-local setup
+./scripts/build-android-apk.sh           # compile, package and validate the APK
+./scripts/build-install-android-peer.sh  # optional: install on one authorized USB device
+```
+
+The setup uses the official Android command-line tools and Gradle distribution, verifies both SHA-256 checksums, and installs under the current user's home directory. It does not require Android Studio, sudo, or changes to shell startup files. The build scripts automatically load the generated environment file. Peer-core tests do not compile the Android framework module and do not replace physical-device acceptance testing.

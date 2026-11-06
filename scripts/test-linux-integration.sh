@@ -3,6 +3,25 @@ set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# This contract suite invokes the built CLI for TLS diagnostics. Keep it safe to
+# run from a fresh checkout instead of relying on a jar left by another test job.
+CORE_JAR="$ROOT/build/personalcloud.jar"
+NEEDS_CORE_BUILD=0
+if [[ ! -s "$CORE_JAR" || "$ROOT/build.sh" -nt "$CORE_JAR" ]]; then
+  NEEDS_CORE_BUILD=1
+else
+  while IFS= read -r -d '' source_file; do
+    if [[ "$source_file" -nt "$CORE_JAR" ]]; then
+      NEEDS_CORE_BUILD=1
+      break
+    fi
+  done < <(find src/main -type f -print0)
+fi
+if (( NEEDS_CORE_BUILD )); then
+  echo "Building fresh desktop core for Linux integration contracts..."
+  ./build.sh
+fi
+
 bash -n integrations/linux/personalcloudctl integrations/linux/personalcloud-mount \
   integrations/linux/personalcloud-dolphin-reference integrations/linux/personalcloud-dolphin-place-file \
   integrations/linux/personalcloud-dolphin-share-file integrations/linux/install-dolphin-actions.sh \

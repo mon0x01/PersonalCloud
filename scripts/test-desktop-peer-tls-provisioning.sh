@@ -32,9 +32,13 @@ DIAGNOSTICS="$(PERSONALCLOUD_TLS_DIR="$OUT" PERSONALCLOUD_TLS_KEYSTORE_PASSWORD=
   PERSONALCLOUD_BIND_ADDRESS=127.0.0.1 \
   "$ROOT/integrations/linux/personalcloudctl" network diagnostics \
   --servers 127.0.0.1:9 --timeout-ms 100)"
+[[ -n "$DIAGNOSTICS" ]] || { echo "FAIL: network diagnostics returned empty output." >&2; exit 1; }
 printf '%s\n' "$DIAGNOSTICS" | python3 -c '
 import json, sys
-value = json.load(sys.stdin)
+try:
+    value = json.load(sys.stdin)
+except json.JSONDecodeError as error:
+    raise SystemExit(f"FAIL: network diagnostics did not return valid JSON: {error}")
 assert value["tlsConfigured"] is True, value
 assert value["tlsIdentityStatus"] == "VALID", value
 '
@@ -42,9 +46,13 @@ DIAGNOSTICS_NO_PASSWORD="$(env -u PERSONALCLOUD_TLS_KEYSTORE_PASSWORD \
   PERSONALCLOUD_TLS_DIR="$OUT" PERSONALCLOUD_BIND_ADDRESS=127.0.0.1 \
   "$ROOT/integrations/linux/personalcloudctl" network diagnostics \
   --servers 127.0.0.1:9 --timeout-ms 100)"
+[[ -n "$DIAGNOSTICS_NO_PASSWORD" ]] || { echo "FAIL: password-free diagnostics returned empty output." >&2; exit 1; }
 printf '%s\n' "$DIAGNOSTICS_NO_PASSWORD" | python3 -c '
 import json, sys
-value = json.load(sys.stdin)
+try:
+    value = json.load(sys.stdin)
+except json.JSONDecodeError as error:
+    raise SystemExit(f"FAIL: password-free diagnostics did not return valid JSON: {error}")
 assert value["tlsConfigured"] is False, value
 assert value["tlsIdentityStatus"] == "PASSWORD_REQUIRED", value
 '
