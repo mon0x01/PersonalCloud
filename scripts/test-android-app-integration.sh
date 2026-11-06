@@ -13,7 +13,15 @@ grep -Fq 'build-tools;35.0.0' scripts/setup-android-build-tools.sh
 grep -Fq 'dump badging' scripts/build-android-apk.sh
 grep -Fq 'apksigner' scripts/build-android-apk.sh
 grep -Fq "targetSdkVersion:'35'" scripts/build-android-apk.sh
-grep -Fq 'set +o pipefail' .github/workflows/android-peer.yml
+grep -Fq 'android-actions/setup-android@v4' .github/workflows/android-peer.yml
+grep -Fq "packages: 'platform-tools'" .github/workflows/android-peer.yml
+grep -Fq "sdkmanager --install 'platforms;android-35' 'build-tools;35.0.0'" .github/workflows/android-peer.yml
+grep -Fq './scripts/build-android-apk.sh' .github/workflows/android-peer.yml
+if grep -Eq 'android-actions/setup-android@v3|sdkmanager[[:space:]]+tools|gradle --offline' \
+    .github/workflows/android-peer.yml; then
+  echo 'FAIL: CI still references the removed Android SDK tools package or offline Gradle APK build.' >&2
+  exit 1
+fi
 
 
 MANIFEST=android-peer/app/src/main/AndroidManifest.xml
@@ -180,11 +188,12 @@ grep -Fq 'externalReferences.openOwnerReference(id.grantId, id.path)' "$PROVIDER
 grep -Fq 'case "localrefdir"' "$PROVIDER"
 grep -Fq 'case "localreffile"' "$PROVIDER"
 
-# The app layer is source-validated here. Full SDK compilation is a separate build requirement.
-if [[ -n "${ANDROID_HOME:-}${ANDROID_SDK_ROOT:-}" || -f "$HOME/.config/personalcloud/android-build-env.sh" ]]; then
+# The general verification job must remain SDK-independent. The dedicated Android
+# workflow owns toolchain provisioning and performs the actual APK compilation.
+if [[ "${PERSONALCLOUD_BUILD_ANDROID_APK:-0}" == "1" ]]; then
   "$ROOT/scripts/build-android-apk.sh"
 else
-  echo 'INFO: Android SDK/Gradle unavailable; app framework source was statically validated, not SDK-compiled.'
+  echo 'INFO: Android framework source contracts validated here; APK compilation runs in the dedicated Android workflow.'
 fi
 
 grep -Fq 'AndroidSafManagedStorageBackend' "$ROOT/android-peer/app/src/main/java/dev/personalcloud/android/PeerService.java"
