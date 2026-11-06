@@ -10,6 +10,14 @@ android {
         versionCode 1
         versionName '0.1.0'
     }
+    buildTypes {
+        // Keep debug installs isolated from the stable package ID. This allows
+        // physical-device testing without replacing a differently signed copy.
+        debug {
+            applicationIdSuffix '.dev'
+            versionNameSuffix '-dev'
+        }
+    }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17

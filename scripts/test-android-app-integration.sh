@@ -13,6 +13,11 @@ grep -Fq 'build-tools;35.0.0' scripts/setup-android-build-tools.sh
 grep -Fq 'dump badging' scripts/build-android-apk.sh
 grep -Fq 'apksigner' scripts/build-android-apk.sh
 grep -Fq "targetSdkVersion:'35'" scripts/build-android-apk.sh
+grep -Fq "applicationId 'dev.personalcloud.android'" android-peer/app/build.gradle
+grep -Fq "applicationIdSuffix '.dev'" android-peer/app/build.gradle
+grep -Fq "package: name='dev.personalcloud.android.dev'" scripts/build-android-apk.sh
+grep -Fq 'install --user "$INSTALL_USER" -r' scripts/build-install-android-peer.sh
+grep -Fq 'dev.personalcloud.android and its Island profile data were not modified' scripts/build-install-android-peer.sh
 grep -Fq 'android-actions/setup-android@v4' .github/workflows/android-peer.yml
 grep -Fq "packages: 'platform-tools'" .github/workflows/android-peer.yml
 grep -Fq "sdkmanager --install 'platforms;android-35' 'build-tools;35.0.0'" .github/workflows/android-peer.yml

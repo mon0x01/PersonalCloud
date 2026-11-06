@@ -35,8 +35,8 @@ APK="$ROOT/android-peer/app/build/outputs/apk/debug/app-debug.apk"
 [[ -s "$APK" ]] || fail "Gradle finished without producing the expected APK: $APK"
 unzip -t "$APK" >/dev/null
 BADGING="$("$SDK/build-tools/35.0.0/aapt" dump badging "$APK")"
-grep -Fq "package: name='dev.personalcloud.android'" <<< "$BADGING" \
-  || fail "APK package identity does not match dev.personalcloud.android."
+grep -Fq "package: name='dev.personalcloud.android.dev'" <<< "$BADGING" \
+  || fail "Debug APK package identity does not match dev.personalcloud.android.dev."
 grep -Fq "sdkVersion:'28'" <<< "$BADGING" \
   || fail "APK minimum SDK is not Android API 28."
 grep -Fq "targetSdkVersion:'35'" <<< "$BADGING" \

@@ -62,9 +62,11 @@ See:
 # Build and inspect the APK without installing it
 ./scripts/build-android-apk.sh
 
-# Build and install on exactly one authorized USB-connected Android device
+# Build and install the isolated debug package on Android user 0
 ./scripts/build-install-android-peer.sh
 ```
+
+The debug APK uses the separate package ID `dev.personalcloud.android.dev`, so it can be installed for device testing without replacing the stable `dev.personalcloud.android` package or its data. The installer targets Android user 0 by default; set `PERSONALCLOUD_ANDROID_INSTALL_USER` to select another Android user.
 
 Start the desktop node:
 

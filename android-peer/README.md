@@ -54,8 +54,8 @@ Assembling the Android APK requires Android SDK Platform 35, Build Tools 35.0.0,
 
 ```bash
 ./scripts/setup-android-build-tools.sh   # one-time, checksum-verified user-local setup
-./scripts/build-android-apk.sh           # compile, package and validate the APK
-./scripts/build-install-android-peer.sh  # optional: install on one authorized USB device
+./scripts/build-android-apk.sh           # compile, package and validate the debug APK
+./scripts/build-install-android-peer.sh  # install the isolated debug app on Android user 0
 ```
 
-The setup uses the official Android command-line tools and Gradle distribution, verifies both SHA-256 checksums, and installs under the current user's home directory. It does not require Android Studio, sudo, or changes to shell startup files. The build scripts automatically load the generated environment file. Peer-core tests do not compile the Android framework module and do not replace physical-device acceptance testing.
+The debug build uses application ID `dev.personalcloud.android.dev` while retaining the stable namespace and release application ID `dev.personalcloud.android`. This keeps debug installs separate from an existing or differently signed stable installation. The installer targets Android user 0 by default; set `PERSONALCLOUD_ANDROID_INSTALL_USER` to another numeric Android user ID when required. The setup uses the official Android command-line tools and Gradle distribution, verifies both SHA-256 checksums, and installs under the current user's home directory. It does not require Android Studio, sudo, or changes to shell startup files. The build scripts automatically load the generated environment file. Peer-core tests do not compile the Android framework module and do not replace physical-device acceptance testing.

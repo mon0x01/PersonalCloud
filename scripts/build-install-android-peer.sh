@@ -25,15 +25,21 @@ else
 fi
 
 API="$("$ADB" -s "$SERIAL" shell getprop ro.build.version.sdk | tr -d '\r')"
+INSTALL_USER="${PERSONALCLOUD_ANDROID_INSTALL_USER:-0}"
+[[ "$INSTALL_USER" =~ ^[0-9]+$ ]] || fail "PERSONALCLOUD_ANDROID_INSTALL_USER must be a numeric Android user ID."
 [[ "$API" =~ ^[0-9]+$ ]] || fail "Could not read Android API level from device '$SERIAL'."
 (( API >= 28 )) || fail "PersonalCloud requires Android API 28 or newer; connected device reports API $API."
 
 "$ROOT/scripts/build-android-apk.sh"
 APK="$ROOT/android-peer/app/build/outputs/apk/debug/app-debug.apk"
-echo "Installing PersonalCloud Android peer on $SERIAL (API $API)..."
-"$ADB" -s "$SERIAL" install -r "$APK"
-printf '\nPASS: installed PersonalCloud Android peer APK on %s.\n' "$SERIAL"
+APP_ID="dev.personalcloud.android.dev"
+echo "Installing PersonalCloud Android development peer on $SERIAL (API $API, Android user $INSTALL_USER)..."
+"$ADB" -s "$SERIAL" install --user "$INSTALL_USER" -r "$APK"
+INSTALLED_PACKAGE="$("$ADB" -s "$SERIAL" shell pm list packages --user "$INSTALL_USER" "$APP_ID" | tr -d '\r')"
+[[ "$INSTALLED_PACKAGE" == "package:$APP_ID" ]] || fail "Installation command completed but $APP_ID is not installed for Android user $INSTALL_USER."
+printf '\nPASS: installed PersonalCloud Android development APK on %s (user %s).\n' "$SERIAL" "$INSTALL_USER"
 printf 'APK SHA-256: '
 sha256sum "$APK" | awk '{print $1}'
-echo "Existing app data, encrypted configuration and imported identities were not cleared by this script."
-echo "Open PersonalCloud on Android and confirm the peer service is running after the update."
+echo "The stable package dev.personalcloud.android and its Island profile data were not modified."
+echo "The development build uses a separate package ID and separate app data/Keystore identity."
+echo "Open PersonalCloud Peer (development build) on Android user $INSTALL_USER and confirm the peer service starts."
