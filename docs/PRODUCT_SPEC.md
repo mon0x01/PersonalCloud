@@ -307,7 +307,7 @@ No file relay, central content server, or mandatory third-party middleware is in
 
 ## 9. Implementation status (honest snapshot)
 
-This section records status at M0 and must be updated in every milestone. It distinguishes verified functionality from target scope.
+This section records the status at the latest completed milestone and is updated at every milestone. It distinguishes verified functionality from target scope.
 
 ### 9.1 Verified implemented
 
@@ -320,13 +320,14 @@ This section records status at M0 and must be updated in every milestone. It dis
 - Linux read-only FUSE adapter source and Dolphin actions (compiled in CI; live mount pending).
 - Android app APK assembly in CI; source-level DocumentsProvider/SAF contracts.
 - Direct connectivity diagnostics.
+- Owner policy foundation: persistent NORMAL/PRIVATE/PROTECTED rules, policy epoch, owner-only local control/CLI management, and short-lived single-use protection approvals. Source-route enforcement is wired in later milestones.
 
 ### 9.2 Target functionality not yet implemented
 
 - Default broad filesystem access to eligible roots.
 - Remote create/edit/write/move and generalized filesystem routes.
 - Writable Linux FUSE and writable Android DocumentsProvider.
-- PRIVATE/PROTECTED policy enforcement and protection approval workflow.
+- Source-side enforcement of PRIVATE hiding and PROTECTED approvals across remote routes.
 - Third-device transfer coordination (Z initiates X→Y).
 - Safe move service with crash recovery and partial-outcome reporting.
 - Delegated admission capability (`ADMIT`) and signed revocation records with epochs.

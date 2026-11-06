@@ -76,6 +76,7 @@ public final class PersonalCloudCli {
             case "reference-grants" -> referenceGrants(client, args, start);
             case "reference-snapshots" -> referenceSnapshots(client, args, start);
             case "managed" -> managed(client, args, start);
+            case "policy" -> policy(client, args, start);
             default -> throw new IllegalArgumentException("Unknown command: " + command);
         }
     }
@@ -197,6 +198,53 @@ public final class PersonalCloudCli {
             }
             default -> throw new IllegalArgumentException("Unknown reference-grants command.");
         }
+    }
+
+    private static void policy(LocalControlClient client, String[] args, int start) throws Exception {
+        if (start >= args.length) throw new IllegalArgumentException("Expected policy list, set, remove, epoch or approvals.");
+        switch (args[start++]) {
+            case "list" -> client.listPolicies().forEach(PersonalCloudCli::print);
+            case "set" -> {
+                requireCount(args, start, 3, 3, "policy set <eligible-root-id> <relative-path-or-.> <NORMAL|PRIVATE|PROTECTED>");
+                print(client.setPolicy(args[start], policyPath(args[start + 1]), args[start + 2]));
+            }
+            case "remove" -> {
+                requireCount(args, start, 2, 2, "policy remove <eligible-root-id> <relative-path-or-.>");
+                print(client.removePolicy(args[start], policyPath(args[start + 1])));
+            }
+            case "epoch" -> print(client.policyEpoch());
+            case "approvals" -> policyApprovals(client, args, start);
+            default -> throw new IllegalArgumentException("Unknown policy command.");
+        }
+    }
+
+    private static void policyApprovals(LocalControlClient client, String[] args, int start) throws Exception {
+        if (start >= args.length) throw new IllegalArgumentException("Expected policy approvals request, approve, deny or status.");
+        switch (args[start++]) {
+            case "request" -> {
+                requireCount(args, start, 4, 5, "policy approvals request <member-id> <eligible-root-id> <relative-path-or-.> <OPERATION> [ttl-seconds]");
+                long ttl = args.length > start + 4 ? Long.parseLong(args[start + 4]) : 0;
+                print(client.requestProtectionApproval(args[start], args[start + 1], policyPath(args[start + 2]),
+                        args[start + 3], ttl));
+            }
+            case "approve" -> {
+                requireCount(args, start, 1, 1, "policy approvals approve <approval-id>");
+                print(client.approveProtection(args[start]));
+            }
+            case "deny" -> {
+                requireCount(args, start, 1, 1, "policy approvals deny <approval-id>");
+                print(client.denyProtection(args[start]));
+            }
+            case "status" -> {
+                requireCount(args, start, 1, 1, "policy approvals status <approval-id>");
+                print(client.protectionStatus(args[start]));
+            }
+            default -> throw new IllegalArgumentException("Unknown policy approvals command.");
+        }
+    }
+
+    private static String policyPath(String value) {
+        return ".".equals(value) ? "" : value;
     }
 
     private static void network(LocalControlClient client, String[] args, int start) throws Exception {

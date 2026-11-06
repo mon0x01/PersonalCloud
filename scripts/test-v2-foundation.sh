@@ -44,6 +44,8 @@ for test in \
   dev.personalcloud.network.ManagedStorageIntegrationTest \
   dev.personalcloud.network.NetworkPeerClientRangeValidationTest \
   dev.personalcloud.network.OutboundTransferQueueTest \
+  dev.personalcloud.policy.FilesystemPolicyServiceTest \
+  dev.personalcloud.policy.ProtectionApprovalServiceTest \
   dev.personalcloud.network.DirectConnectivityDiagnosticsTest \
   dev.personalcloud.transfer.ResumableTransferManagerTest; do
   run_test "$test"

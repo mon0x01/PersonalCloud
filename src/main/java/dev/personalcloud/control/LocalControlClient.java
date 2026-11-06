@@ -357,6 +357,49 @@ public final class LocalControlClient {
     }
 
     @SuppressWarnings("unchecked")
+    public List<Map<String, Object>> listPolicies() throws IOException {
+        Object rows = request("policy.list").get("rules");
+        if (!(rows instanceof List<?> list)) throw new IOException("The control server returned an invalid policy list.");
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> map)) throw new IOException("The control server returned an invalid policy entry.");
+            result.add((Map<String, Object>) map);
+        }
+        return List.copyOf(result);
+    }
+
+    public Map<String, Object> setPolicy(String rootId, String path, String mode) throws IOException {
+        return request("policy.set", fields("rootId", requireText(rootId, "Eligible root ID"),
+                "path", path == null ? "" : path, "mode", requireText(mode, "Policy mode")));
+    }
+
+    public Map<String, Object> removePolicy(String rootId, String path) throws IOException {
+        return request("policy.remove", fields("rootId", requireText(rootId, "Eligible root ID"),
+                "path", path == null ? "" : path));
+    }
+
+    public Map<String, Object> policyEpoch() throws IOException { return request("policy.epoch"); }
+
+    public Map<String, Object> requestProtectionApproval(String memberId, String rootId, String path,
+                                                          String operation, long ttlSeconds) throws IOException {
+        return request("policy.approvals.request", fields("memberId", requireText(memberId, "Member ID"),
+                "rootId", requireText(rootId, "Eligible root ID"), "path", path == null ? "" : path,
+                "operation", requireText(operation, "Policy operation"), "ttlSeconds", ttlSeconds));
+    }
+
+    public Map<String, Object> approveProtection(String approvalId) throws IOException {
+        return request("policy.approvals.approve", fields("approvalId", requireText(approvalId, "Approval ID")));
+    }
+
+    public Map<String, Object> denyProtection(String approvalId) throws IOException {
+        return request("policy.approvals.deny", fields("approvalId", requireText(approvalId, "Approval ID")));
+    }
+
+    public Map<String, Object> protectionStatus(String approvalId) throws IOException {
+        return request("policy.approvals.status", fields("approvalId", requireText(approvalId, "Approval ID")));
+    }
+
+    @SuppressWarnings("unchecked")
     public List<Map<String, Object>> listRemoteShares(String peerId) throws IOException {
         Object rows = request("remote.shares.list", fields("peerId", requireText(peerId, "Peer ID"))).get("shares");
         if (!(rows instanceof List<?> list)) throw new IOException("The control server returned an invalid remote share list.");

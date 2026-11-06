@@ -126,6 +126,21 @@ public final class LocalControlClientTest {
             check(Arrays.equals(Files.readAllBytes(download), payload), "download must reconstruct the exact original file");
             expectFailure(() -> client.download(rootId, "Research/Large payload.bin", download), "download must not overwrite an existing destination");
 
+            check(((Number) client.policyEpoch().get("epoch")).longValue() == 0L, "fresh policy epoch must be zero");
+            client.setPolicy(rootId, "Research", "PROTECTED");
+            check(client.listPolicies().size() == 1, "policy set must persist a rule");
+            check("PROTECTED".equals(client.listPolicies().get(0).get("mode")), "policy list must expose the configured mode");
+            check(((Number) client.policyEpoch().get("epoch")).longValue() == 1L, "policy set must advance the epoch");
+            Map<String, Object> approval = client.requestProtectionApproval("node-test-id", rootId, "Research", "DELETE", 60);
+            @SuppressWarnings("unchecked") Map<String, Object> approvalBody = (Map<String, Object>) approval.get("approval");
+            String approvalId = (String) approvalBody.get("approvalId");
+            check("PENDING".equals(approvalBody.get("state")), "requested approval must be pending");
+            client.approveProtection(approvalId);
+            check("APPROVED".equals(((Map<?, ?>) client.protectionStatus(approvalId).get("approval")).get("state")),
+                    "protection approval must be observable through local control");
+            check(Boolean.TRUE.equals(client.removePolicy(rootId, "Research").get("removed")),
+                    "policy removal must report the removed rule");
+
             // Duplicate startup must not unlink or replace the original process's socket.
             LocalControlServer duplicate = new LocalControlServer(data, config.nodeId(), config.nodeName(), storage, config, peers, grants);
             try {

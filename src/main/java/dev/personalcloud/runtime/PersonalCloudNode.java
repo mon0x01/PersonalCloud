@@ -15,6 +15,8 @@ import dev.personalcloud.network.DeviceCatalogueService;
 import dev.personalcloud.storage.ReferenceGrantService;
 import dev.personalcloud.storage.ReferenceVersionService;
 import dev.personalcloud.storage.ManagedStorageService;
+import dev.personalcloud.policy.FilesystemPolicyService;
+import dev.personalcloud.policy.ProtectionApprovalService;
 
 /** Owns the lifecycle and dependency graph of one PersonalCloud node. */
 public final class PersonalCloudNode implements AutoCloseable {
@@ -30,6 +32,8 @@ public final class PersonalCloudNode implements AutoCloseable {
     private final ReferenceGrantService referenceGrants;
     private final ReferenceVersionService referenceVersions;
     private final ManagedStorageService managedStorage;
+    private final FilesystemPolicyService policy;
+    private final ProtectionApprovalService approvals;
     private final PeerProtocolServer protocol;
     private final LocalControlServer localControl;
     private boolean started;
@@ -47,10 +51,13 @@ public final class PersonalCloudNode implements AutoCloseable {
         this.referenceGrants = new ReferenceGrantService(state, references, membership);
         this.referenceVersions = new ReferenceVersionService(config.dataDirectory(), references);
         this.managedStorage = new ManagedStorageService(state, config);
+        this.policy = new FilesystemPolicyService(state);
+        this.approvals = new ProtectionApprovalService();
         this.protocol = new PeerProtocolServer(config, files, peers, grants, new AuditLog(config.dataDirectory()),
                 membership, references, referenceGrants, referenceVersions, managedStorage);
         this.localControl = new LocalControlServer(config.dataDirectory(), config.nodeId(), config.nodeName(), references,
-                config, peers, grants, membership, catalogue, referenceGrants, referenceVersions, managedStorage);
+                config, peers, grants, membership, catalogue, referenceGrants, referenceVersions, managedStorage,
+                policy, approvals);
     }
 
     public synchronized void start() throws Exception {
