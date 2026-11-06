@@ -34,14 +34,16 @@ This repository contains the scoped Java V2 desktop node, its local control CLI,
 
 ## Current integration boundary
 
-The Linux Java filesystem model and read-only JNR-FUSE2 adapter are implemented; the adapter has compiled successfully on Arch Linux with Maven and FUSE2 development headers. A real kernel mount remains to be validated. KDE Dolphin actions register directories in place, place whole files on a selected member, and share an individual file by reference without copying it. Android peer-core implements signed network membership and remote storage operations. Android app source includes operational membership controls, a signed-network DocumentsProvider, and no-copy SAF references for selected folders and individual files. The Android framework module still needs SDK compilation and physical-device validation; final UI redesign remains deferred pending product-owner UX feedback.
+The Linux Java filesystem model and read-only JNR-FUSE2 adapter are implemented; the adapter has compiled successfully on Arch Linux with Maven and FUSE2 development headers. A real kernel mount remains to be validated. KDE Dolphin actions register directories in place, place whole files on a selected member, and share an individual file by reference without copying it. Android peer-core implements signed network membership and remote storage operations. Android app source includes operational membership controls, a signed-network DocumentsProvider, and no-copy SAF references for selected folders and individual files. The Android framework module is assembled as a debug APK in CI; physical-device validation and the final UI redesign remain pending product-owner UX feedback.
 
 See:
+- [Product specification](docs/PRODUCT_SPEC.md) — canonical source of truth
+- [Architecture decision records](docs/decisions/)
 - [Project status](PROJECT_STATUS.md)
-- [Product scope](docs/v2/SCOPE.md)
+- [Product scope (historical)](docs/v2/SCOPE.md)
 - [Architecture](ARCHITECTURE.md)
 - [Security model](SECURITY.md)
-- [Roadmap](docs/v2/ROADMAP.md)
+- [Roadmap (historical)](docs/v2/ROADMAP.md)
 
 ## Requirements
 
