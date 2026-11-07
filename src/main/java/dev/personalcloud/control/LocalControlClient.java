@@ -400,6 +400,36 @@ public final class LocalControlClient {
     }
 
     @SuppressWarnings("unchecked")
+    public List<Map<String, Object>> listProtectionApprovals() throws IOException {
+        Object rows = request("policy.approvals.list").get("approvals");
+        if (!(rows instanceof List<?> list)) throw new IOException("The control server returned an invalid approval list.");
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> map)) throw new IOException("The control server returned an invalid approval entry.");
+            result.add((Map<String, Object>) map);
+        }
+        return List.copyOf(result);
+    }
+
+    public Map<String, Object> filesystemStatus() throws IOException { return request("filesystem.status"); }
+
+    @SuppressWarnings("unchecked")
+    public List<Map<String, Object>> filesystemRoots() throws IOException {
+        Object rows = request("filesystem.roots").get("roots");
+        if (!(rows instanceof List<?> list)) throw new IOException("The control server returned an invalid eligible-root list.");
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> map)) throw new IOException("The control server returned an invalid eligible-root entry.");
+            result.add((Map<String, Object>) map);
+        }
+        return List.copyOf(result);
+    }
+
+    public Map<String, Object> grantFilesystemConsent() throws IOException { return request("filesystem.consent"); }
+
+    public Map<String, Object> revokeFilesystemConsent() throws IOException { return request("filesystem.revoke-consent"); }
+
+    @SuppressWarnings("unchecked")
     public List<Map<String, Object>> listRemoteShares(String peerId) throws IOException {
         Object rows = request("remote.shares.list", fields("peerId", requireText(peerId, "Peer ID"))).get("shares");
         if (!(rows instanceof List<?> list)) throw new IOException("The control server returned an invalid remote share list.");

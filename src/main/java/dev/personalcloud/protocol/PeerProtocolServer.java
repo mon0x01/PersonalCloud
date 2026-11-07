@@ -19,6 +19,11 @@ import dev.personalcloud.storage.ReferenceGrantService;
 import dev.personalcloud.storage.ReferenceVersionService;
 import dev.personalcloud.storage.StorageEntry;
 import dev.personalcloud.storage.ManagedStorageService;
+import dev.personalcloud.storage.EligibleStorageService;
+import dev.personalcloud.policy.ApprovalRequiredException;
+import dev.personalcloud.policy.FilesystemPolicyService;
+import dev.personalcloud.policy.PolicyOperation;
+import dev.personalcloud.policy.ProtectionApprovalService;
 import dev.personalcloud.transfer.ResumableTransferManager;
 
 import javax.net.ssl.KeyManagerFactory;
@@ -56,6 +61,9 @@ public final class PeerProtocolServer implements AutoCloseable {
     private final ReferenceGrantService referenceGrants;
     private final ReferenceVersionService referenceVersions;
     private final ManagedStorageService managedStorage;
+    private final FilesystemPolicyService policy;
+    private final ProtectionApprovalService approvals;
+    private final EligibleStorageService filesystem;
     private final SecurityMonitor security = new SecurityMonitor();
     private ResumableTransferManager transfers;
     private HttpServer server;
@@ -64,7 +72,9 @@ public final class PeerProtocolServer implements AutoCloseable {
     public PeerProtocolServer(AppConfig config, FileService files, PeerService peers,
                               GrantService grants, AuditLog audit, NetworkMembershipService membership,
                               ReferenceStorageService references, ReferenceGrantService referenceGrants,
-                              ReferenceVersionService referenceVersions, ManagedStorageService managedStorage) {
+                              ReferenceVersionService referenceVersions, ManagedStorageService managedStorage,
+                              FilesystemPolicyService policy, ProtectionApprovalService approvals,
+                              EligibleStorageService filesystem) {
         this.config = config;
         this.files = files;
         this.peers = peers;
@@ -75,7 +85,41 @@ public final class PeerProtocolServer implements AutoCloseable {
         this.referenceGrants = referenceGrants;
         this.referenceVersions = referenceVersions;
         this.managedStorage = managedStorage;
+        this.policy = policy;
+        this.approvals = approvals;
+        this.filesystem = filesystem;
     }
+
+    public PeerProtocolServer(AppConfig config, FileService files, PeerService peers,
+                              GrantService grants, AuditLog audit, NetworkMembershipService membership,
+                              ReferenceStorageService references, ReferenceGrantService referenceGrants,
+                              ReferenceVersionService referenceVersions, ManagedStorageService managedStorage) {
+        this(config, files, peers, grants, audit, membership, references, referenceGrants, referenceVersions,
+                managedStorage, legacyFilesystem(config));
+    }
+
+    private PeerProtocolServer(AppConfig config, FileService files, PeerService peers, GrantService grants,
+                               AuditLog audit, NetworkMembershipService membership,
+                               ReferenceStorageService references, ReferenceGrantService referenceGrants,
+                               ReferenceVersionService referenceVersions, ManagedStorageService managedStorage,
+                               LegacyFilesystem legacy) {
+        this(config, files, peers, grants, audit, membership, references, referenceGrants, referenceVersions,
+                managedStorage, legacy.policy(), legacy.approvals(), legacy.filesystem());
+    }
+
+    private static LegacyFilesystem legacyFilesystem(AppConfig config) {
+        try {
+            dev.personalcloud.core.StateStore store = new dev.personalcloud.core.StateStore(config.dataDirectory());
+            FilesystemPolicyService policy = new FilesystemPolicyService(store);
+            ProtectionApprovalService approvals = new ProtectionApprovalService();
+            return new LegacyFilesystem(policy, approvals, new EligibleStorageService(config, store, policy, approvals));
+        } catch (Exception failure) {
+            throw new IllegalStateException("Unable to initialize filesystem policy services.", failure);
+        }
+    }
+
+    private record LegacyFilesystem(FilesystemPolicyService policy, ProtectionApprovalService approvals,
+                                    EligibleStorageService filesystem) { }
 
     public PeerProtocolServer(AppConfig config, FileService files, PeerService peers,
                               GrantService grants, AuditLog audit, NetworkMembershipService membership,
@@ -179,6 +223,12 @@ public final class PeerProtocolServer implements AutoCloseable {
             sendJson(exchange, 404, Map.of("error", "PersonalCloud exposes only the peer protocol on this endpoint."));
         } catch (Throwable failure) {
             try {
+                if (failure instanceof ApprovalRequiredException approval) {
+                    sendJson(exchange, 403, Map.of("error", approval.getMessage(), "approvalRequired", true,
+                            "rootId", approval.rootId(), "path", approval.path(),
+                            "operation", approval.operation().name()));
+                    return;
+                }
                 int status = failure instanceof RangeNotSatisfiableException ? 416
                         : failure instanceof SecurityException ? 403
                         : failure instanceof IllegalArgumentException ? 400 : 500;
@@ -209,6 +259,10 @@ public final class PeerProtocolServer implements AutoCloseable {
         if ("GET".equals(method) && path.startsWith(statusPrefix)) {
             String requestId = decode(path.substring(statusPrefix.length()));
             sendJson(exchange, 200, membership.enrollmentResult(requestId));
+            return;
+        }
+        if (path.startsWith("/network/fs/")) {
+            handleFilesystemApi(exchange, path, method);
             return;
         }
 
@@ -392,6 +446,173 @@ public final class PeerProtocolServer implements AutoCloseable {
             return;
         }
         sendJson(exchange, 404, Map.of("error", "Network route not found."));
+    }
+
+    private void handleFilesystemApi(HttpExchange exchange, String path, String method) throws Exception {
+        String prefix = "/network/fs/";
+        String remainder = path.substring(prefix.length());
+        if ("GET".equals(method) && "roots".equals(remainder)) {
+            String member = authenticateMember(exchange, method, new byte[0]);
+            if (member == null) return;
+            sendJson(exchange, 200, Map.of("roots", filesystem.rootsForMember()));
+            return;
+        }
+        if ("PUT".equals(method) && remainder.matches("[^/]+/content")) {
+            handleFilesystemWrite(exchange, path, remainder.substring(0, remainder.length() - "/content".length()));
+            return;
+        }
+        byte[] body = "POST".equals(method) ? readLimitedBody(exchange.getRequestBody(), 64 * 1024) : new byte[0];
+        String member = authenticateMember(exchange, method, body);
+        if (member == null) return;
+        String[] segments = remainder.split("/", -1);
+        Map<String, String> query = queryParameters(exchange.getRequestURI().getRawQuery());
+        if (segments.length == 2 && "approvals".equals(segments[0])) {
+            if ("GET".equals(method)) {
+                sendJson(exchange, 200, filesystem.approvalStatus(member, decode(segments[1])));
+                return;
+            }
+            throw new IllegalArgumentException("Unsupported filesystem approval route.");
+        }
+        if (segments.length != 2) throw new IllegalArgumentException("Invalid filesystem route.");
+        String rootId = decode(segments[0]);
+        String action = segments[1];
+        String relativePath = query.getOrDefault("path", "");
+        switch (action) {
+            case "entries" -> {
+                if (!"GET".equals(method)) break;
+                sendJson(exchange, 200, Map.of("entries", filesystem.list(member, rootId, relativePath)));
+                return;
+            }
+            case "stat" -> {
+                if (!"GET".equals(method)) break;
+                sendJson(exchange, 200, filesystem.stat(member, rootId, relativePath));
+                return;
+            }
+            case "content" -> {
+                if (!"GET".equals(method)) break;
+                streamEligibleFile(exchange, member, rootId, relativePath);
+                return;
+            }
+            case "directories" -> {
+                if (!"POST".equals(method)) break;
+                Map<String, Object> request = Json.object(new String(body, StandardCharsets.UTF_8));
+                sendJson(exchange, 201, filesystem.createDirectory(member, rootId, string(request, "path")));
+                return;
+            }
+            case "move" -> {
+                if (!"POST".equals(method)) break;
+                Map<String, Object> request = Json.object(new String(body, StandardCharsets.UTF_8));
+                sendJson(exchange, 200, filesystem.move(member, rootId, string(request, "from"), string(request, "to"),
+                        booleanValue(request, "overwrite", false), optionalString(request, "approvalId"),
+                        optionalString(request, "destinationApprovalId")));
+                return;
+            }
+            case "entry" -> {
+                if (!"DELETE".equals(method)) break;
+                sendJson(exchange, 200, filesystem.delete(member, rootId, relativePath,
+                        booleanValue(query, "recursive", false), optionalString(query, "approvalId")));
+                return;
+            }
+            case "approvals" -> {
+                if (!"POST".equals(method)) break;
+                Map<String, Object> request = Json.object(new String(body, StandardCharsets.UTF_8));
+                String operation = string(request, "operation").strip().toUpperCase(java.util.Locale.ROOT);
+                sendJson(exchange, 201, filesystem.requestApproval(member, rootId, string(request, "path"),
+                        PolicyOperation.valueOf(operation), longValue(request, "ttlSeconds", 0)));
+                return;
+            }
+            default -> { }
+        }
+        throw new IllegalArgumentException("Unsupported filesystem operation.");
+    }
+
+    private void handleFilesystemWrite(HttpExchange exchange, String path, String encodedRootId) throws Exception {
+        Map<String, String> query = queryParameters(exchange.getRequestURI().getRawQuery());
+        String relativePath = query.getOrDefault("path", "");
+        long declaredSize;
+        try { declaredSize = Long.parseLong(exchange.getRequestHeaders().getFirst("X-PC-File-Length")); }
+        catch (Exception invalid) { throw new IllegalArgumentException("A valid signed filesystem-file length is required."); }
+        String declaredHash = exchange.getRequestHeaders().getFirst("X-PC-File-SHA256");
+        boolean overwrite = Boolean.parseBoolean(query.getOrDefault("overwrite", "false"));
+        String approvalId = exchange.getRequestHeaders().getFirst("X-PC-Approval-ID");
+        Map<String, Object> uploadMetadata = new LinkedHashMap<>();
+        uploadMetadata.put("path", relativePath);
+        uploadMetadata.put("size", declaredSize);
+        uploadMetadata.put("sha256", declaredHash == null ? "" : declaredHash);
+        uploadMetadata.put("overwrite", overwrite);
+        uploadMetadata.put("approvalId", approvalId == null ? "" : approvalId);
+        byte[] authenticationBody = Json.stringify(uploadMetadata).getBytes(StandardCharsets.UTF_8);
+        if (!membership.authenticate("PUT", exchange.getRequestURI().toASCIIString(),
+                exchange.getRequestHeaders(), authenticationBody)) {
+            sendJson(exchange, 401, Map.of("error", "A valid active PersonalCloud network-member identity is required."));
+            return;
+        }
+        long contentLength = parseContentLength(exchange.getRequestHeaders().getFirst("Content-Length"));
+        if (contentLength != declaredSize) throw new IllegalArgumentException("HTTP content length does not match the signed filesystem-file length.");
+        String member = exchange.getRequestHeaders().getFirst("X-PC-Node-ID");
+        Map<String, Object> stored = filesystem.write(member, decode(encodedRootId), relativePath,
+                exchange.getRequestBody(), declaredSize, declaredHash, overwrite, approvalId);
+        sendJson(exchange, 201, stored);
+    }
+
+    private void streamEligibleFile(HttpExchange exchange, String memberId, String rootId,
+                                    String relativePath) throws Exception {
+        Map<String, Object> metadata = filesystem.stat(memberId, rootId, relativePath);
+        if (!"FILE".equals(metadata.get("kind"))) throw new IllegalArgumentException("The requested path is not a file.");
+        long size = ((Number) metadata.get("size")).longValue();
+        long start = 0;
+        long end = size - 1;
+        int status = 200;
+        long[] range = requestedRange(exchange, size);
+        if (range != null) {
+            start = range[0];
+            end = range[1];
+            status = 206;
+        }
+        long length = Math.max(0, end - start + 1);
+        Headers headers = exchange.getResponseHeaders();
+        headers.set("Content-Type", "application/octet-stream");
+        headers.set("Accept-Ranges", "bytes");
+        headers.set("X-Content-SHA256", filesystem.sha256(memberId, rootId, relativePath));
+        setAttachmentName(headers, String.valueOf(metadata.get("name")));
+        if (status == 206) {
+            headers.set("Content-Range", "bytes " + start + "-" + end + "/" + size);
+            try (InputStream digestInput = filesystem.open(memberId, rootId, relativePath)) {
+                headers.set("X-Content-Range-SHA256", sha256Range(digestInput, start, length));
+            }
+        }
+        try (InputStream input = filesystem.open(memberId, rootId, relativePath)) {
+            input.skipNBytes(start);
+            exchange.sendResponseHeaders(status, length);
+            try (OutputStream output = exchange.getResponseBody()) { copy(input, output, length); }
+        }
+    }
+
+    private String authenticateMember(HttpExchange exchange, String method, byte[] body) throws Exception {
+        if (!membership.authenticate(method, exchange.getRequestURI().toASCIIString(),
+                exchange.getRequestHeaders(), body)) {
+            sendJson(exchange, 401, Map.of("error", "A valid active PersonalCloud network-member identity is required."));
+            return null;
+        }
+        return exchange.getRequestHeaders().getFirst("X-PC-Node-ID");
+    }
+
+    private static boolean booleanValue(Map<String, ?> map, String key, boolean fallback) {
+        Object value = map.get(key);
+        if (value == null) return fallback;
+        if (value instanceof Boolean bool) return bool;
+        return Boolean.parseBoolean(String.valueOf(value));
+    }
+
+    private static String optionalString(Map<String, ?> map, String key) {
+        Object value = map.get(key);
+        return value == null ? "" : String.valueOf(value);
+    }
+
+    private static long longValue(Map<String, ?> map, String key, long fallback) {
+        Object value = map.get(key);
+        if (value instanceof Number number) return number.longValue();
+        try { return Long.parseLong(String.valueOf(value)); } catch (Exception ignored) { return fallback; }
     }
 
     private static long number(Object value) {

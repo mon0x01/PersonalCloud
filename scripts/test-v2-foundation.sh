@@ -35,6 +35,7 @@ for test in \
   dev.personalcloud.core.FileServiceUploadAtomicityTest \
   dev.personalcloud.core.VersionServiceTest \
   dev.personalcloud.storage.ReferenceStorageServiceTest \
+  dev.personalcloud.storage.EligibleStorageServiceTest \
   dev.personalcloud.control.LocalControlClientTest \
   dev.personalcloud.storage.ReferenceFileSystemModelCacheTest \
   dev.personalcloud.protocol.PeerProtocolServerTest \
@@ -42,6 +43,7 @@ for test in \
   dev.personalcloud.network.NetworkProtocolIntegrationTest \
   dev.personalcloud.network.RemoteReferenceIntegrationTest \
   dev.personalcloud.network.ManagedStorageIntegrationTest \
+  dev.personalcloud.network.EligibleStorageIntegrationTest \
   dev.personalcloud.network.NetworkPeerClientRangeValidationTest \
   dev.personalcloud.network.OutboundTransferQueueTest \
   dev.personalcloud.policy.FilesystemPolicyServiceTest \

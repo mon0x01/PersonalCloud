@@ -18,6 +18,7 @@ import dev.personalcloud.core.StateStore;
 import dev.personalcloud.storage.ReferenceGrantService;
 import dev.personalcloud.storage.ReferenceVersionService;
 import dev.personalcloud.storage.ManagedStorageService;
+import dev.personalcloud.storage.EligibleStorageService;
 import dev.personalcloud.network.NetworkPeerClient;
 import dev.personalcloud.network.OutboundTransferQueue;
 import dev.personalcloud.core.StateStore;
@@ -73,6 +74,7 @@ public final class LocalControlServer implements AutoCloseable {
     private final ManagedStorageService managedStorage;
     private final FilesystemPolicyService policy;
     private final ProtectionApprovalService approvals;
+    private final EligibleStorageService filesystem;
     private final OutboundTransferQueue outboundTransfers;
     private final java.util.concurrent.ScheduledExecutorService transferRetryScheduler =
             Executors.newSingleThreadScheduledExecutor(r -> {
@@ -94,7 +96,7 @@ public final class LocalControlServer implements AutoCloseable {
                               PeerService peers, GrantService grants, NetworkMembershipService membership, DeviceCatalogueService catalogue,
                               ReferenceGrantService referenceGrants, ReferenceVersionService referenceVersions,
                               ManagedStorageService managedStorage, FilesystemPolicyService policy,
-                              ProtectionApprovalService approvals) {
+                              ProtectionApprovalService approvals, EligibleStorageService filesystem) {
         this.socketPath = dataDirectory.toAbsolutePath().normalize().resolve("control.sock");
         this.nodeId = nodeId;
         this.nodeName = nodeName;
@@ -109,6 +111,7 @@ public final class LocalControlServer implements AutoCloseable {
         this.managedStorage = managedStorage;
         this.policy = policy;
         this.approvals = approvals;
+        this.filesystem = filesystem;
         try {
             this.outboundTransfers = new OutboundTransferQueue(new StateStore(config.dataDirectory()), membership,
                     this::requireMemberEndpoint, config.maxFileBytes());
@@ -129,7 +132,7 @@ public final class LocalControlServer implements AutoCloseable {
                                GrantService grants, LegacyDependencies dependencies) {
         this(dataDirectory, nodeId, nodeName, references, config, peers, grants,
                 dependencies.membership(), dependencies.catalogue(), dependencies.referenceGrants(), dependencies.referenceVersions(), dependencies.managedStorage(),
-                dependencies.policy(), dependencies.approvals());
+                dependencies.policy(), dependencies.approvals(), dependencies.filesystem());
     }
 
     private static LegacyDependencies legacyDependencies(Path dataDirectory, AppConfig config,
@@ -137,16 +140,18 @@ public final class LocalControlServer implements AutoCloseable {
         dev.personalcloud.core.StateStore store = new dev.personalcloud.core.StateStore(config.dataDirectory());
         NetworkMembershipService membership = new NetworkMembershipService(store, config);
         DeviceCatalogueService catalogue = new DeviceCatalogueService(config, membership);
+        FilesystemPolicyService policy = new FilesystemPolicyService(store);
+        ProtectionApprovalService approvals = new ProtectionApprovalService();
         return new LegacyDependencies(membership, catalogue,
                 new ReferenceGrantService(store, references, membership),
                 new ReferenceVersionService(config.dataDirectory(), references), new ManagedStorageService(store, config),
-                new FilesystemPolicyService(store), new ProtectionApprovalService());
+                policy, approvals, new EligibleStorageService(config, store, policy, approvals));
     }
 
     private record LegacyDependencies(NetworkMembershipService membership, DeviceCatalogueService catalogue,
                                       ReferenceGrantService referenceGrants, ReferenceVersionService referenceVersions,
                                       ManagedStorageService managedStorage, FilesystemPolicyService policy,
-                                      ProtectionApprovalService approvals) { }
+                                      ProtectionApprovalService approvals, EligibleStorageService filesystem) { }
 
     public synchronized void start() throws Exception {
         if (running.get()) return;
@@ -534,6 +539,16 @@ public final class LocalControlServer implements AutoCloseable {
                             "approval", approvals.deny(string(request, "approvalId"))));
                     case "policy.approvals.status" -> respond(output, responseStarted, Map.of("ok", true,
                             "approval", approvals.status(string(request, "approvalId"))));
+                    case "policy.approvals.list" -> respond(output, responseStarted, Map.of("ok", true,
+                            "approvals", approvals.list()));
+                    case "filesystem.status" -> respond(output, responseStarted, Map.of("ok", true,
+                            "filesystem", filesystem.status()));
+                    case "filesystem.roots" -> respond(output, responseStarted, Map.of("ok", true,
+                            "roots", filesystem.rootsForOwner()));
+                    case "filesystem.consent" -> respond(output, responseStarted, Map.of("ok", true,
+                            "filesystem", filesystem.grantConsent()));
+                    case "filesystem.revoke-consent" -> respond(output, responseStarted, Map.of("ok", true,
+                            "filesystem", filesystem.revokeConsent()));
                     default -> throw new IllegalArgumentException("Unsupported local control command.");
                 }
             } catch (Exception failure) {

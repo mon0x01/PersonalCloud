@@ -79,6 +79,17 @@ public final class ProtectionApprovalService {
         return approval.toMap();
     }
 
+    /** Lists every approval known to this process, newest first, for the owner-only control socket. */
+    public synchronized java.util.List<Map<String, Object>> list() {
+        java.util.List<Map<String, Object>> result = new java.util.ArrayList<>();
+        for (Approval approval : approvals.values()) {
+            approval.expireIfNeeded();
+            result.add(approval.toMap());
+        }
+        result.sort((left, right) -> String.valueOf(right.get("expiresAt")).compareTo(String.valueOf(left.get("expiresAt"))));
+        return java.util.List.copyOf(result);
+    }
+
     private Approval require(String approvalId) {
         if (approvalId == null || approvalId.isBlank()) throw new IllegalArgumentException("An approval ID is required.");
         Approval approval = approvals.get(approvalId);

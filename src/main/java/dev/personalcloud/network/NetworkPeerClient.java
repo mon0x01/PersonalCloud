@@ -376,6 +376,178 @@ public final class NetworkPeerClient {
         return deleteJson(baseUrl, "/network/managed/files/" + encode(fileId), membership);
     }
 
+    public Map<String, Object> listFilesystemRoots(String baseUrl, NetworkMembershipService membership) throws Exception {
+        return getJson(baseUrl, "/network/fs/roots", membership);
+    }
+
+    public Map<String, Object> browseFilesystem(String baseUrl, String rootId, String relativePath,
+                                                NetworkMembershipService membership) throws Exception {
+        return getJson(baseUrl, filesystemPath(rootId, "entries", relativePath), membership);
+    }
+
+    public Map<String, Object> statFilesystem(String baseUrl, String rootId, String relativePath,
+                                              NetworkMembershipService membership) throws Exception {
+        return getJson(baseUrl, filesystemPath(rootId, "stat", relativePath), membership);
+    }
+
+    /** Reads a bounded byte range from a remote eligible filesystem file. */
+    public RemoteRangeResult readRemoteFilesystemRange(String baseUrl, String rootId, String relativePath,
+                                                       long offset, int length,
+                                                       NetworkMembershipService membership) throws Exception {
+        if (offset < 0 || length < 0 || length > 8 * 1024 * 1024) {
+            throw new IllegalArgumentException("Remote filesystem range is outside the permitted bounds.");
+        }
+        Map<String, Object> metadata = statFilesystem(baseUrl, rootId, relativePath, membership);
+        if (!"FILE".equals(metadata.get("kind"))) {
+            throw new IllegalArgumentException("The selected remote path is not a regular file.");
+        }
+        long size = number(metadata.get("size"));
+        if (size < 0) throw new java.io.IOException("Remote filesystem stat did not report a valid size.");
+        if (offset >= size || length == 0) return new RemoteRangeResult(new byte[0], size, "");
+        int bounded = (int) Math.min((long) length, size - offset);
+        String path = filesystemPath(rootId, "content", relativePath) + "&offset=" + offset + "&length=" + bounded;
+        return readRange(baseUrl, path, offset, bounded, size, membership);
+    }
+
+    public Map<String, Object> createFilesystemDirectory(String baseUrl, String rootId, String relativePath,
+                                                          NetworkMembershipService membership) throws Exception {
+        return postJson(baseUrl, "/network/fs/" + encode(rootId) + "/directories",
+                Map.of("path", relativePath == null ? "" : relativePath), membership);
+    }
+
+    public Map<String, Object> moveFilesystemEntry(String baseUrl, String rootId, String from, String to,
+                                                    boolean overwrite, String approvalId,
+                                                    NetworkMembershipService membership) throws Exception {
+        return moveFilesystemEntry(baseUrl, rootId, from, to, overwrite, approvalId, "", membership);
+    }
+
+    public Map<String, Object> moveFilesystemEntry(String baseUrl, String rootId, String from, String to,
+                                                    boolean overwrite, String approvalId,
+                                                    String destinationApprovalId,
+                                                    NetworkMembershipService membership) throws Exception {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("from", from);
+        body.put("to", to);
+        body.put("overwrite", overwrite);
+        body.put("approvalId", approvalId == null ? "" : approvalId);
+        body.put("destinationApprovalId", destinationApprovalId == null ? "" : destinationApprovalId);
+        return postJson(baseUrl, "/network/fs/" + encode(rootId) + "/move", body, membership);
+    }
+
+    public Map<String, Object> deleteFilesystemEntry(String baseUrl, String rootId, String relativePath,
+                                                      boolean recursive, String approvalId,
+                                                      NetworkMembershipService membership) throws Exception {
+        String path = "/network/fs/" + encode(rootId) + "/entry?path=" + encode(relativePath == null ? "" : relativePath)
+                + "&recursive=" + recursive + "&approvalId=" + encode(approvalId == null ? "" : approvalId);
+        return deleteJson(baseUrl, path, membership);
+    }
+
+    public Map<String, Object> requestFilesystemApproval(String baseUrl, String rootId, String relativePath,
+                                                          String operation, long ttlSeconds,
+                                                          NetworkMembershipService membership) throws Exception {
+        return postJson(baseUrl, "/network/fs/" + encode(rootId) + "/approvals",
+                Map.of("path", relativePath == null ? "" : relativePath, "operation", operation,
+                        "ttlSeconds", ttlSeconds), membership);
+    }
+
+    public Map<String, Object> filesystemApprovalStatus(String baseUrl, String approvalId,
+                                                        NetworkMembershipService membership) throws Exception {
+        return getJson(baseUrl, "/network/fs/approvals/" + encode(approvalId), membership);
+    }
+
+    public Map<String, Object> uploadFilesystemFile(String baseUrl, String rootId, String relativePath, Path source,
+                                                     boolean overwrite, String approvalId,
+                                                     NetworkMembershipService membership, long maximumBytes) throws Exception {
+        Path file = source.toAbsolutePath().normalize();
+        if (Files.isSymbolicLink(file) || !Files.isRegularFile(file, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            throw new IllegalArgumentException("Filesystem upload source must be a regular non-symlink file.");
+        }
+        long size = Files.size(file);
+        if (size < 0 || size > maximumBytes) throw new IllegalArgumentException("Source file exceeds the configured transfer limit.");
+        String hash = sha256(file);
+        String path = "/network/fs/" + encode(rootId) + "/content?path=" + encode(relativePath == null ? "" : relativePath)
+                + "&overwrite=" + overwrite;
+        Map<String, Object> metadata = new LinkedHashMap<>();
+        metadata.put("path", relativePath == null ? "" : relativePath);
+        metadata.put("size", size);
+        metadata.put("sha256", hash);
+        metadata.put("overwrite", overwrite);
+        metadata.put("approvalId", approvalId == null ? "" : approvalId);
+        byte[] signedMetadata = Json.stringify(metadata).getBytes(StandardCharsets.UTF_8);
+        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(RemotePeerClient.normalizeBaseUrl(baseUrl) + path))
+                .timeout(Duration.ofMinutes(30))
+                .header("Accept", "application/json")
+                .header("Content-Type", "application/octet-stream")
+                .header("X-PC-File-Length", Long.toString(size))
+                .header("X-PC-File-SHA256", hash);
+        if (approvalId != null && !approvalId.isBlank()) builder.header("X-PC-Approval-ID", approvalId);
+        membership.createAuthHeaders("PUT", path, signedMetadata).forEach(builder::header);
+        HttpResponse<String> response = client.send(builder.PUT(HttpRequest.BodyPublishers.ofFile(file)).build(),
+                HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        return parseResponse(response.statusCode(), response.body());
+    }
+
+    public RemoteDownloadResult downloadFilesystemFile(String baseUrl, String rootId, String relativePath,
+                                                        Path destination, NetworkMembershipService membership,
+                                                        long maximumBytes) throws Exception {
+        Map<String, Object> metadata = statFilesystem(baseUrl, rootId, relativePath, membership);
+        if (!"FILE".equals(metadata.get("kind"))) throw new IllegalArgumentException("The selected remote path is not a regular file.");
+        long expectedSize = number(metadata.get("size"));
+        if (expectedSize < 0 || expectedSize > maximumBytes) throw new IllegalArgumentException("Remote file exceeds the configured download limit.");
+        String path = filesystemPath(rootId, "content", relativePath);
+        HttpRequest.Builder request = request(baseUrl, path, "GET", new byte[0], membership);
+        request.timeout(Duration.ofMinutes(30));
+        HttpResponse<InputStream> response = client.send(request.GET().build(), HttpResponse.BodyHandlers.ofInputStream());
+        if (response.statusCode() != 200) {
+            try (InputStream ignored = response.body()) { }
+            throw new java.io.IOException("Remote filesystem download failed with HTTP " + response.statusCode() + ".");
+        }
+        String expectedHash = response.headers().firstValue("X-Content-SHA256").orElse("").toLowerCase(java.util.Locale.ROOT);
+        if (!expectedHash.matches("[a-f0-9]{64}")) {
+            try (InputStream ignored = response.body()) { }
+            throw new java.io.IOException("Remote filesystem response did not include a valid SHA-256 digest.");
+        }
+        Path requested = destination.toAbsolutePath().normalize();
+        Path requestedParent = requested.getParent();
+        if (requestedParent == null || requested.getFileName() == null || !Files.isDirectory(requestedParent)) {
+            try (InputStream ignored = response.body()) { }
+            throw new IllegalArgumentException("Destination parent directory does not exist.");
+        }
+        Path parent = requestedParent.toRealPath();
+        Path target = parent.resolve(requested.getFileName().toString());
+        if (Files.exists(target, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            try (InputStream ignored = response.body()) { }
+            throw new IllegalArgumentException("Destination already exists; PersonalCloud will not overwrite it.");
+        }
+        Path temporary = Files.createTempFile(parent, ".personalcloud-download-", ".part");
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            long copied = 0;
+            try (InputStream input = response.body(); OutputStream output = Files.newOutputStream(temporary,
+                    StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE)) {
+                byte[] buffer = new byte[128 * 1024];
+                int read;
+                while ((read = input.read(buffer)) != -1) {
+                    copied = Math.addExact(copied, read);
+                    if (copied > maximumBytes || copied > expectedSize) throw new java.io.IOException("Remote file exceeded its declared or configured size limit.");
+                    digest.update(buffer, 0, read);
+                    output.write(buffer, 0, read);
+                }
+            }
+            String actualHash = HexFormat.of().formatHex(digest.digest());
+            if (copied != expectedSize || !expectedHash.equals(actualHash)) {
+                throw new java.io.IOException("Remote download failed size or SHA-256 integrity verification.");
+            }
+            Files.createLink(target, temporary);
+            Files.delete(temporary);
+            return new RemoteDownloadResult(target, copied, actualHash);
+        } finally { Files.deleteIfExists(temporary); }
+    }
+
+    private static String filesystemPath(String rootId, String action, String relativePath) {
+        return "/network/fs/" + encode(rootId) + "/" + action + "?path=" + encode(relativePath == null ? "" : relativePath);
+    }
+
     private RemoteDownloadResult downloadBinary(String baseUrl, String path, long expectedSize, String expectedHash,
                                                  Path destination, NetworkMembershipService membership,
                                                  long maximumBytes) throws Exception {

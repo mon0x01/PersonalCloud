@@ -77,6 +77,7 @@ public final class PersonalCloudCli {
             case "reference-snapshots" -> referenceSnapshots(client, args, start);
             case "managed" -> managed(client, args, start);
             case "policy" -> policy(client, args, start);
+            case "filesystem" -> filesystem(client, args, start);
             default -> throw new IllegalArgumentException("Unknown command: " + command);
         }
     }
@@ -219,8 +220,9 @@ public final class PersonalCloudCli {
     }
 
     private static void policyApprovals(LocalControlClient client, String[] args, int start) throws Exception {
-        if (start >= args.length) throw new IllegalArgumentException("Expected policy approvals request, approve, deny or status.");
+        if (start >= args.length) throw new IllegalArgumentException("Expected policy approvals list, request, approve, deny or status.");
         switch (args[start++]) {
+            case "list" -> client.listProtectionApprovals().forEach(PersonalCloudCli::print);
             case "request" -> {
                 requireCount(args, start, 4, 5, "policy approvals request <member-id> <eligible-root-id> <relative-path-or-.> <OPERATION> [ttl-seconds]");
                 long ttl = args.length > start + 4 ? Long.parseLong(args[start + 4]) : 0;
@@ -245,6 +247,17 @@ public final class PersonalCloudCli {
 
     private static String policyPath(String value) {
         return ".".equals(value) ? "" : value;
+    }
+
+    private static void filesystem(LocalControlClient client, String[] args, int start) throws Exception {
+        if (start >= args.length) throw new IllegalArgumentException("Expected filesystem status, roots, consent or revoke-consent.");
+        switch (args[start++]) {
+            case "status" -> print(client.filesystemStatus());
+            case "roots" -> client.filesystemRoots().forEach(PersonalCloudCli::print);
+            case "consent" -> print(client.grantFilesystemConsent());
+            case "revoke-consent" -> print(client.revokeFilesystemConsent());
+            default -> throw new IllegalArgumentException("Unknown filesystem command.");
+        }
     }
 
     private static void network(LocalControlClient client, String[] args, int start) throws Exception {

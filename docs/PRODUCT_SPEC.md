@@ -320,16 +320,14 @@ This section records the status at the latest completed milestone and is updated
 - Linux read-only FUSE adapter source and Dolphin actions (compiled in CI; live mount pending).
 - Android app APK assembly in CI; source-level DocumentsProvider/SAF contracts.
 - Direct connectivity diagnostics.
-- Owner policy foundation: persistent NORMAL/PRIVATE/PROTECTED rules, policy epoch, owner-only local control/CLI management, and short-lived single-use protection approvals. Source-route enforcement is wired in later milestones.
+- Owner policy foundation: persistent NORMAL/PRIVATE/PROTECTED rules, policy epoch, owner-only local control/CLI management, and short-lived single-use protection approvals.
+- Eligible-root filesystem access (M2): owner consent, OS-user ownership boundaries, system/credential/PersonalCloud-state exclusions, signed `/network/fs/*` browse/stat/bounded-range/download/create/write/move/delete routes, source-side PRIVATE hiding and PROTECTED approval enforcement, atomic SHA-256-verified writes, no-overwrite publication, and separate source/destination approvals for protected moves.
 
 ### 9.2 Target functionality not yet implemented
 
-- Default broad filesystem access to eligible roots.
-- Remote create/edit/write/move and generalized filesystem routes.
 - Writable Linux FUSE and writable Android DocumentsProvider.
-- Source-side enforcement of PRIVATE hiding and PROTECTED approvals across remote routes.
 - Third-device transfer coordination (Z initiates X→Y).
-- Safe move service with crash recovery and partial-outcome reporting.
+- Safe cross-device move service with crash recovery and partial-outcome reporting.
 - Delegated admission capability (`ADMIT`) and signed revocation records with epochs.
 - Per-member TLS endpoint pinning, enrollment rate limiting, JSON depth limits, per-uploader transfer quotas.
 - Complete `docs/` documentation structure and ADRs beyond M0.
@@ -337,6 +335,12 @@ This section records the status at the latest completed milestone and is updated
 ### 9.3 Known limitations
 
 - No independent security audit.
+- Protection approvals are process-local; a restart fails closed and requires fresh approvals.
+- Remote filesystem operations are not yet audited, quota-limited, or rate-limited.
+- Broad-access consent is currently an owner-local CLI action; it is not yet part of the enrollment or upgrade user experience.
+- The OS-user ownership boundary checks the eligible root itself and rejects shared home parents such as `/home` and `/Users`. It does not enumerate every user home beneath an arbitrary owner-controlled volume.
+- Remote range reads recompute the full-file digest on each request.
+- Directory moves and recursive deletes refuse trees containing PRIVATE/PROTECTED rules or excluded credential paths; per-descendant approval is not yet available.
 - No live Linux FUSE mount/kernel callback validation.
 - No physical Android device/lifecycle/SAF validation.
 - No root succession/rotation (deferred by decision).

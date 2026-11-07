@@ -15,6 +15,7 @@ import dev.personalcloud.network.DeviceCatalogueService;
 import dev.personalcloud.storage.ReferenceGrantService;
 import dev.personalcloud.storage.ReferenceVersionService;
 import dev.personalcloud.storage.ManagedStorageService;
+import dev.personalcloud.storage.EligibleStorageService;
 import dev.personalcloud.policy.FilesystemPolicyService;
 import dev.personalcloud.policy.ProtectionApprovalService;
 
@@ -53,11 +54,12 @@ public final class PersonalCloudNode implements AutoCloseable {
         this.managedStorage = new ManagedStorageService(state, config);
         this.policy = new FilesystemPolicyService(state);
         this.approvals = new ProtectionApprovalService();
+        EligibleStorageService filesystem = new EligibleStorageService(config, state, policy, approvals);
         this.protocol = new PeerProtocolServer(config, files, peers, grants, new AuditLog(config.dataDirectory()),
-                membership, references, referenceGrants, referenceVersions, managedStorage);
+                membership, references, referenceGrants, referenceVersions, managedStorage, policy, approvals, filesystem);
         this.localControl = new LocalControlServer(config.dataDirectory(), config.nodeId(), config.nodeName(), references,
                 config, peers, grants, membership, catalogue, referenceGrants, referenceVersions, managedStorage,
-                policy, approvals);
+                policy, approvals, filesystem);
     }
 
     public synchronized void start() throws Exception {
