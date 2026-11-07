@@ -48,6 +48,16 @@ public final class PersonalCloudDocumentsProvider extends DocumentsProvider {
     private static final String DOC_LOCAL = "local";
     private static final String DOC_LOCAL_REFERENCES = "localrefs";
     private static final int RANGE_CHUNK = 4 * 1024 * 1024;
+    /** Writable proxy staging cap; larger eligible-storage files remain readable but are not edited in place. */
+    private static final long MAX_STAGED_BYTES = 512L * 1024 * 1024;
+    private static final int FILE_WRITE_FLAGS = DocumentsContract.Document.FLAG_SUPPORTS_WRITE
+            | DocumentsContract.Document.FLAG_SUPPORTS_DELETE
+            | DocumentsContract.Document.FLAG_SUPPORTS_RENAME
+            | DocumentsContract.Document.FLAG_SUPPORTS_MOVE;
+    private static final int DIRECTORY_WRITE_FLAGS = DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE
+            | DocumentsContract.Document.FLAG_SUPPORTS_DELETE
+            | DocumentsContract.Document.FLAG_SUPPORTS_RENAME
+            | DocumentsContract.Document.FLAG_SUPPORTS_MOVE;
     private static final String MEMBER_CACHE = "documents.network.members";
 
     private static final String[] ROOT_COLUMNS = {
@@ -96,7 +106,7 @@ public final class PersonalCloudDocumentsProvider extends DocumentsProvider {
         row.put(DocumentsContract.Root.COLUMN_ROOT_ID, ROOT_ID);
         row.put(DocumentsContract.Root.COLUMN_DOCUMENT_ID, DOC_ROOT);
         row.put(DocumentsContract.Root.COLUMN_TITLE, "PersonalCloud");
-        row.put(DocumentsContract.Root.COLUMN_SUMMARY, "Private devices and on-demand files");
+        row.put(DocumentsContract.Root.COLUMN_SUMMARY, "Private devices, on-demand files and writable eligible storage");
         row.put(DocumentsContract.Root.COLUMN_ICON, android.R.drawable.ic_menu_save);
         row.put(DocumentsContract.Root.COLUMN_FLAGS, DocumentsContract.Root.FLAG_SUPPORTS_SEARCH
                 | DocumentsContract.Root.FLAG_SUPPORTS_IS_CHILD);
@@ -204,7 +214,13 @@ public final class PersonalCloudDocumentsProvider extends DocumentsProvider {
             DocumentId parent = DocumentId.parse(parentDocumentId);
             DocumentId child = DocumentId.parse(documentId);
             if (parent.type.equals("peer")) return child.peerId.equals(parent.peerId)
-                    && (child.type.equals("refs") || child.type.equals("managed"));
+                    && (child.type.equals("refs") || child.type.equals("managed") || child.type.equals("fss"));
+            if (parent.type.equals("fss")) return child.peerId.equals(parent.peerId) && child.type.equals("fsroot");
+            if ((parent.type.equals("fsroot") || parent.type.equals("fsdir"))
+                    && (child.type.equals("fsdir") || child.type.equals("fsfile"))) {
+                return child.peerId.equals(parent.peerId) && child.grantId.equals(parent.grantId)
+                        && isPathWithin(parent.path, child.path);
+            }
             if (parent.type.equals("refs")) return child.peerId.equals(parent.peerId)
                     && (child.type.equals("refdir") || child.type.equals("reffile"));
             if (parent.type.equals("managed")) return child.peerId.equals(parent.peerId) && child.type.equals("managedfile");
@@ -227,10 +243,13 @@ public final class PersonalCloudDocumentsProvider extends DocumentsProvider {
 
     @Override public ParcelFileDescriptor openDocument(String documentId, String mode, CancellationSignal signal)
             throws FileNotFoundException {
-        if (!"r".equals(mode)) throw new UnsupportedOperationException("PersonalCloud documents are read-only in this release.");
         if (signal != null && signal.isCanceled()) throw fileNotFound("Document open was cancelled.", null);
         try {
             DocumentId id = DocumentId.parse(documentId);
+            if (id.type.equals("fsfile")) return openFilesystemDocument(id, mode, signal);
+            if (!"r".equals(mode)) {
+                throw new UnsupportedOperationException("Only eligible-storage documents are writable in this release.");
+            }
             if (id.type.equals("localfile")) {
                 Path file = localPath(id.path);
                 return ParcelFileDescriptor.open(file.toFile(), ParcelFileDescriptor.MODE_READ_ONLY);
@@ -293,6 +312,9 @@ public final class PersonalCloudDocumentsProvider extends DocumentsProvider {
                 }
                 NetworkPeerConnector.deleteManagedFile(peerEndpoint, id.fileId, membership, ca);
                 invalidateManagedCaches(id.peerId, id.fileId);
+            } else if (id.type.equals("fsfile") || id.type.equals("fsdir")) {
+                NetworkPeerConnector.deleteFilesystemEntry(peerEndpoint, id.grantId, id.path,
+                        id.type.equals("fsdir"), "", membership, ca);
             } else {
                 throw new SecurityException("Only remote files can be deleted through this PersonalCloud document provider.");
             }
@@ -304,6 +326,116 @@ public final class PersonalCloudDocumentsProvider extends DocumentsProvider {
         } catch (Exception error) {
             throw fileNotFound("Could not delete PersonalCloud document: " + safe(error), error);
         }
+    }
+
+    @Override public String createDocument(String parentDocumentId, String mimeType, String displayName)
+            throws FileNotFoundException {
+        try {
+            DocumentId parent = DocumentId.parse(parentDocumentId);
+            if (!parent.type.equals("fsroot") && !parent.type.equals("fsdir")) {
+                throw new SecurityException("New documents can only be created inside writable eligible storage.");
+            }
+            String name = writableName(displayName);
+            String childPath = parent.path.isEmpty() ? name : parent.path + "/" + name;
+            NetworkMembershipClient membership = requireMembership();
+            String peerEndpoint = endpoint(parent.peerId);
+            String ca = trustedCa();
+            String documentId;
+            if (DocumentsContract.Document.MIME_TYPE_DIR.equals(mimeType)) {
+                NetworkPeerConnector.createFilesystemDirectory(peerEndpoint, parent.grantId, childPath, membership, ca);
+                documentId = DocumentId.filesystemDir(parent.peerId, parent.grantId, childPath);
+            } else {
+                Path staging = Files.createTempFile("personalcloud-create-", ".part");
+                try {
+                    NetworkPeerConnector.uploadFilesystemFile(peerEndpoint, parent.grantId, childPath, staging,
+                            false, "", membership, ca, MAX_STAGED_BYTES);
+                } finally { Files.deleteIfExists(staging); }
+                documentId = DocumentId.filesystemFile(parent.peerId, parent.grantId, childPath);
+            }
+            notifyParent(parentDocumentId);
+            return documentId;
+        } catch (FileNotFoundException error) {
+            throw error;
+        } catch (Exception error) {
+            throw fileNotFound("Could not create PersonalCloud document: " + safe(error), error);
+        }
+    }
+
+    @Override public String renameDocument(String documentId, String displayName) throws FileNotFoundException {
+        try {
+            DocumentId id = DocumentId.parse(documentId);
+            if (!id.type.equals("fsfile") && !id.type.equals("fsdir")) {
+                throw new SecurityException("Only eligible-storage documents can be renamed.");
+            }
+            String name = writableName(displayName);
+            String parent = parentPath(id.path);
+            String destination = parent.isEmpty() ? name : parent + "/" + name;
+            if (destination.equals(id.path)) return documentId;
+            NetworkPeerConnector.moveFilesystemEntry(endpoint(id.peerId), id.grantId, id.path, destination,
+                    false, "", requireMembership(), trustedCa());
+            notifyParent(DocumentId.filesystemDir(id.peerId, id.grantId, parent));
+            return id.type.equals("fsfile")
+                    ? DocumentId.filesystemFile(id.peerId, id.grantId, destination)
+                    : DocumentId.filesystemDir(id.peerId, id.grantId, destination);
+        } catch (FileNotFoundException error) {
+            throw error;
+        } catch (Exception error) {
+            throw fileNotFound("Could not rename PersonalCloud document: " + safe(error), error);
+        }
+    }
+
+    @Override public String moveDocument(String sourceDocumentId, String sourceParentDocumentId,
+                                         String targetParentDocumentId) throws FileNotFoundException {
+        try {
+            DocumentId source = DocumentId.parse(sourceDocumentId);
+            DocumentId target = DocumentId.parse(targetParentDocumentId);
+            if (!source.type.equals("fsfile") && !source.type.equals("fsdir")) {
+                throw new SecurityException("Only eligible-storage documents can be moved.");
+            }
+            if (!target.type.equals("fsroot") && !target.type.equals("fsdir")) {
+                throw new SecurityException("The destination is not a writable eligible-storage directory.");
+            }
+            if (!source.peerId.equals(target.peerId) || !source.grantId.equals(target.grantId)) {
+                throw new SecurityException("PersonalCloud cannot move entries across devices or eligible roots.");
+            }
+            String name = lastSegment(source.path);
+            if (name.isEmpty()) throw new SecurityException("The eligible root itself cannot be moved.");
+            String destination = target.path.isEmpty() ? name : target.path + "/" + name;
+            if (destination.equals(source.path)) return sourceDocumentId;
+            NetworkPeerConnector.moveFilesystemEntry(endpoint(source.peerId), source.grantId, source.path,
+                    destination, false, "", requireMembership(), trustedCa());
+            notifyParent(sourceParentDocumentId);
+            notifyParent(targetParentDocumentId);
+            return source.type.equals("fsfile")
+                    ? DocumentId.filesystemFile(source.peerId, source.grantId, destination)
+                    : DocumentId.filesystemDir(source.peerId, source.grantId, destination);
+        } catch (FileNotFoundException error) {
+            throw error;
+        } catch (Exception error) {
+            throw fileNotFound("Could not move PersonalCloud document: " + safe(error), error);
+        }
+    }
+
+    private void notifyParent(String parentDocumentId) {
+        if (parentDocumentId == null) return;
+        appContext().getContentResolver().notifyChange(
+                DocumentsContract.buildDocumentUri(authority(), parentDocumentId), null);
+        appContext().getContentResolver().notifyChange(DocumentsContract.buildRootsUri(authority()), null);
+    }
+
+    private static String writableName(String displayName) {
+        String name = displayName == null ? "" : displayName;
+        if (name.isBlank() || name.equals(".") || name.equals("..") || name.indexOf('/') >= 0
+                || name.indexOf('\\') >= 0 || name.indexOf('\0') >= 0) {
+            throw new SecurityException("The document name is not a safe single path segment.");
+        }
+        return name;
+    }
+
+    private static String parentPath(String path) {
+        if (path == null || path.isEmpty()) return "";
+        int separator = path.lastIndexOf('/');
+        return separator < 0 ? "" : path.substring(0, separator);
     }
 
     @Override public void shutdown() {
@@ -332,10 +464,15 @@ public final class PersonalCloudDocumentsProvider extends DocumentsProvider {
             case "localrefdir" -> localReferenceChildren(parent.grantId, parent.path);
             case "peer" -> List.of(
                     directoryRow(DocumentId.refs(parent.peerId), "References", "Existing files shared by this device", false),
-                    directoryRow(DocumentId.managed(parent.peerId), "Distributed-Storage", "Whole files stored on this device", false));
+                    directoryRow(DocumentId.managed(parent.peerId), "Distributed-Storage", "Whole files stored on this device", false),
+                    directoryRow(DocumentId.filesystem(parent.peerId), "Filesystem",
+                            "Owner's actual files and folders · writable", false));
             case "refs" -> referenceRoots(parent.peerId);
             case "managed" -> managedRows(parent.peerId);
             case "refdir" -> referenceChildren(parent.peerId, parent.grantId, parent.path);
+            case "fss" -> filesystemRoots(parent.peerId);
+            case "fsroot" -> filesystemChildren(parent.peerId, parent.grantId, "");
+            case "fsdir" -> filesystemChildren(parent.peerId, parent.grantId, parent.path);
             default -> Collections.emptyList();
         };
     }
@@ -451,6 +588,113 @@ public final class PersonalCloudDocumentsProvider extends DocumentsProvider {
         return result;
     }
 
+    private List<Map<String,Object>> filesystemRoots(String peerId) throws Exception {
+        List<Map<String,Object>> result = new ArrayList<>();
+        for (Map<String,Object> root : NetworkPeerConnector.listFilesystemRoots(endpoint(peerId),
+                requireMembership(), trustedCa())) {
+            String rootId = text(root.get("rootId"));
+            if (rootId.isBlank()) continue;
+            String name = text(root.get("name"), "Storage");
+            result.add(directoryRow(DocumentId.filesystemRoot(peerId, rootId), name,
+                    "Owner's eligible storage · writable", false, DIRECTORY_WRITE_FLAGS));
+        }
+        sortRows(result);
+        return result;
+    }
+
+    private List<Map<String,Object>> filesystemChildren(String peerId, String rootId, String relativePath)
+            throws Exception {
+        List<Map<String,Object>> result = new ArrayList<>();
+        for (Map<String,Object> entry : NetworkPeerConnector.browseFilesystem(endpoint(peerId), rootId,
+                relativePath, requireMembership(), trustedCa())) {
+            String name = text(entry.get("name"));
+            if (name.isEmpty()) continue;
+            String path = text(entry.get("path"), relativePath.isEmpty() ? name : relativePath + "/" + name);
+            if ("DIRECTORY".equalsIgnoreCase(text(entry.get("kind")))) {
+                result.add(directoryRow(DocumentId.filesystemDir(peerId, rootId, path), name,
+                        "Owner's eligible storage · writable", false, DIRECTORY_WRITE_FLAGS));
+            } else {
+                result.add(fileRow(DocumentId.filesystemFile(peerId, rootId, path), name,
+                        text(entry.get("mimeType"), mime(name)), number(entry.get("size"), 0L),
+                        parseTimeMillis(entry.get("modified")), "Owner's eligible storage · writable",
+                        FILE_WRITE_FLAGS));
+            }
+        }
+        sortRows(result);
+        return result;
+    }
+
+    private String filesystemRootName(String peerId, String rootId) throws Exception {
+        for (Map<String,Object> root : NetworkPeerConnector.listFilesystemRoots(endpoint(peerId),
+                requireMembership(), trustedCa())) {
+            if (rootId.equals(text(root.get("rootId")))) return text(root.get("name"), "Storage");
+        }
+        throw new FileNotFoundException("The eligible storage root is no longer available.");
+    }
+
+    private ParcelFileDescriptor openFilesystemDocument(DocumentId id, String mode, CancellationSignal signal)
+            throws Exception {
+        boolean read = mode != null && mode.indexOf('r') >= 0;
+        boolean write = mode != null && mode.indexOf('w') >= 0;
+        if (!read && !write) throw new FileNotFoundException("Unsupported document mode: " + mode);
+        NetworkMembershipClient membership = requireMembership();
+        String peerEndpoint = endpoint(id.peerId);
+        String ca = trustedCa();
+        Map<String,Object> metadata = NetworkPeerConnector.statFilesystem(peerEndpoint, id.grantId, id.path,
+                membership, ca);
+        if ("DIRECTORY".equalsIgnoreCase(text(metadata.get("kind")))) {
+            throw new FileNotFoundException("Only file documents can be opened.");
+        }
+        long size = number(metadata.get("size"), -1L);
+        if (size < 0) throw new FileNotFoundException("The owner did not report a valid file size.");
+        StorageManager storage = appContext().getSystemService(StorageManager.class);
+        if (storage == null) throw new IllegalStateException("Android proxy file descriptors are unavailable on this device.");
+        if (!write) {
+            return storage.openProxyFileDescriptor(ParcelFileDescriptor.MODE_READ_ONLY,
+                    new FilesystemReadCallback(peerEndpoint, id.grantId, id.path, membership, ca, size, signal),
+                    proxyHandler);
+        }
+        if (size > MAX_STAGED_BYTES) {
+            throw new FileNotFoundException("This file is too large to edit through this device ("
+                    + size + " bytes; limit " + MAX_STAGED_BYTES + ").");
+        }
+        Path staging = Files.createTempFile("personalcloud-fs-", ".part");
+        boolean truncate = mode.indexOf('t') >= 0;
+        try {
+            if (!truncate) downloadFilesystemFile(peerEndpoint, id.grantId, id.path, staging, membership, ca, size);
+            int descriptorMode = read ? ParcelFileDescriptor.MODE_READ_WRITE : ParcelFileDescriptor.MODE_WRITE_ONLY;
+            return storage.openProxyFileDescriptor(descriptorMode,
+                    new FilesystemWriteCallback(peerEndpoint, id.grantId, id.path, staging, membership, ca, signal, truncate),
+                    proxyHandler);
+        } catch (Exception failure) {
+            Files.deleteIfExists(staging);
+            throw failure;
+        }
+    }
+
+    private static void downloadFilesystemFile(String peerEndpoint, String rootId, String relativePath,
+                                               Path staging, NetworkMembershipClient membership, String ca,
+                                               long expectedSize) throws Exception {
+        try (java.io.OutputStream output = Files.newOutputStream(staging,
+                java.nio.file.StandardOpenOption.TRUNCATE_EXISTING, java.nio.file.StandardOpenOption.WRITE)) {
+            long offset = 0;
+            while (offset < expectedSize) {
+                int chunk = (int) Math.min((long) RANGE_CHUNK, expectedSize - offset);
+                PeerConnector.RangeResult result = NetworkPeerConnector.readFilesystemRange(peerEndpoint, rootId,
+                        relativePath, offset, chunk, membership, ca);
+                if (result.totalSize != expectedSize) {
+                    throw new java.io.IOException("Remote file size changed while it was being staged.");
+                }
+                if (result.bytes.length != chunk) {
+                    throw new java.io.IOException("Remote file ended before its declared size.");
+                }
+                output.write(result.bytes);
+                offset += chunk;
+            }
+        }
+        if (Files.size(staging) != expectedSize) throw new java.io.IOException("Staged file size does not match the owner metadata.");
+    }
+
     private Map<String,Object> document(String documentId) throws Exception {
         if (DOC_ROOT.equals(documentId)) return directoryRow(DOC_ROOT, "PersonalCloud", "Private device network", false);
         if (DOC_LOCAL.equals(documentId)) return directoryRow(DOC_LOCAL, "This device", "Phone-owned storage", false);
@@ -498,6 +742,33 @@ public final class PersonalCloudDocumentsProvider extends DocumentsProvider {
         if (id.type.equals("managedfile")) {
             Map<String,Object> metadata = managedMetadata(id.peerId, id.fileId);
             return remoteManagedFileRow(id.peerId, metadata, Boolean.TRUE.equals(metadata.get("stale")));
+        }
+        if (id.type.equals("fss")) {
+            return directoryRow(documentId, "Filesystem", "Owner's actual files and folders · writable", false);
+        }
+        if (id.type.equals("fsroot")) {
+            return directoryRow(documentId, filesystemRootName(id.peerId, id.grantId),
+                    "Owner's eligible storage · writable", false, DIRECTORY_WRITE_FLAGS);
+        }
+        if (id.type.equals("fsdir")) {
+            Map<String,Object> metadata = NetworkPeerConnector.statFilesystem(endpoint(id.peerId), id.grantId,
+                    id.path, requireMembership(), trustedCa());
+            if (!"DIRECTORY".equalsIgnoreCase(text(metadata.get("kind")))) {
+                throw new FileNotFoundException("The remote path is not a directory.");
+            }
+            return directoryRow(documentId, text(metadata.get("name"), lastSegment(id.path)),
+                    "Owner's eligible storage · writable", false, DIRECTORY_WRITE_FLAGS);
+        }
+        if (id.type.equals("fsfile")) {
+            Map<String,Object> metadata = NetworkPeerConnector.statFilesystem(endpoint(id.peerId), id.grantId,
+                    id.path, requireMembership(), trustedCa());
+            if ("DIRECTORY".equalsIgnoreCase(text(metadata.get("kind")))) {
+                throw new FileNotFoundException("The remote path is not a file.");
+            }
+            String name = text(metadata.get("name"), lastSegment(id.path));
+            return fileRow(documentId, name, text(metadata.get("mimeType"), mime(name)),
+                    number(metadata.get("size"), 0L), parseTimeMillis(metadata.get("modified")),
+                    "Owner's eligible storage · writable", FILE_WRITE_FLAGS);
         }
         throw new FileNotFoundException("Unknown PersonalCloud document identifier.");
     }
@@ -750,11 +1021,15 @@ public final class PersonalCloudDocumentsProvider extends DocumentsProvider {
     }
 
     private static Map<String,Object> directoryRow(String id, String name, String summary, boolean stale) {
+        return directoryRow(id, name, summary, stale, 0);
+    }
+
+    private static Map<String,Object> directoryRow(String id, String name, String summary, boolean stale, int flags) {
         Map<String,Object> row = new LinkedHashMap<>();
         row.put(DocumentsContract.Document.COLUMN_DOCUMENT_ID, id);
         row.put(DocumentsContract.Document.COLUMN_DISPLAY_NAME, name);
         row.put(DocumentsContract.Document.COLUMN_MIME_TYPE, DocumentsContract.Document.MIME_TYPE_DIR);
-        row.put(DocumentsContract.Document.COLUMN_FLAGS, 0);
+        row.put(DocumentsContract.Document.COLUMN_FLAGS, flags);
         row.put(DocumentsContract.Document.COLUMN_SIZE, null);
         row.put(DocumentsContract.Document.COLUMN_LAST_MODIFIED, null);
         row.put(DocumentsContract.Document.COLUMN_SUMMARY, summary);
@@ -844,6 +1119,10 @@ public final class PersonalCloudDocumentsProvider extends DocumentsProvider {
         static String referenceDir(String peer, String grant, String path) { return "refdir|" + encode(peer) + "|" + encode(grant) + "|" + encode(path); }
         static String referenceFile(String peer, String grant, String path) { return "reffile|" + encode(peer) + "|" + encode(grant) + "|" + encode(path); }
         static String managedFile(String peer, String file) { return "managedfile|" + encode(peer) + "|" + encode(file); }
+        static String filesystem(String peer) { return "fss|" + encode(peer); }
+        static String filesystemRoot(String peer, String root) { return "fsroot|" + encode(peer) + "|" + encode(root); }
+        static String filesystemDir(String peer, String root, String path) { return "fsdir|" + encode(peer) + "|" + encode(root) + "|" + encode(path); }
+        static String filesystemFile(String peer, String root, String path) { return "fsfile|" + encode(peer) + "|" + encode(root) + "|" + encode(path); }
         static String localDir(String path) { return "localdir|" + encode(path); }
         static String localFile(String path) { return "localfile|" + encode(path); }
         static String localReferenceDir(String grant, String path) { return "localrefdir|" + encode(grant) + "|" + encode(path); }
@@ -858,6 +1137,10 @@ public final class PersonalCloudDocumentsProvider extends DocumentsProvider {
                     case "refdir" -> new DocumentId("refdir", decode(fields[1]), decode(fields[2]), "", decode(fields[3]));
                     case "reffile" -> new DocumentId("reffile", decode(fields[1]), decode(fields[2]), "", decode(fields[3]));
                     case "managedfile" -> new DocumentId("managedfile", decode(fields[1]), "", decode(fields[2]), "");
+                    case "fss" -> new DocumentId("fss", decode(fields[1]), "", "", "");
+                    case "fsroot" -> new DocumentId("fsroot", decode(fields[1]), decode(fields[2]), "", "");
+                    case "fsdir" -> new DocumentId("fsdir", decode(fields[1]), decode(fields[2]), "", decode(fields[3]));
+                    case "fsfile" -> new DocumentId("fsfile", decode(fields[1]), decode(fields[2]), "", decode(fields[3]));
                     case "localdir" -> new DocumentId("localdir", "", "", "", decode(fields[1]));
                     case "localfile" -> new DocumentId("localfile", "", "", "", decode(fields[1]));
                     case "localrefdir" -> new DocumentId("localrefdir", "", decode(fields[1]), "", decode(fields[2]));
@@ -950,5 +1233,145 @@ public final class PersonalCloudDocumentsProvider extends DocumentsProvider {
             }
         }
         @Override public void onRelease() { /* No descriptor-level network resource is retained. */ }
+    }
+
+    private static final class FilesystemReadCallback extends ProxyFileDescriptorCallback {
+        private final String endpoint, rootId, path, trustedCa;
+        private final NetworkMembershipClient membership;
+        private final long totalSize;
+        private final CancellationSignal cancellation;
+
+        FilesystemReadCallback(String endpoint, String rootId, String path, NetworkMembershipClient membership,
+                               String trustedCa, long totalSize, CancellationSignal cancellation) {
+            this.endpoint = endpoint; this.rootId = rootId; this.path = path; this.membership = membership;
+            this.trustedCa = trustedCa; this.totalSize = totalSize; this.cancellation = cancellation;
+        }
+
+        @Override public long onGetSize() { return totalSize; }
+
+        @Override public int onRead(long offset, int size, byte[] data) throws ErrnoException {
+            if (offset < 0 || size < 0) throw new ErrnoException("read", OsConstants.EINVAL);
+            if (size == 0 || offset >= totalSize) return 0;
+            if (cancellation != null && cancellation.isCanceled()) throw new ErrnoException("read", OsConstants.ECANCELED);
+            int requested = (int) Math.min((long) size, totalSize - offset);
+            int copied = 0;
+            try {
+                while (copied < requested) {
+                    if (cancellation != null && cancellation.isCanceled()) {
+                        throw new ErrnoException("read", OsConstants.ECANCELED);
+                    }
+                    int chunk = Math.min(RANGE_CHUNK, requested - copied);
+                    PeerConnector.RangeResult result = NetworkPeerConnector.readFilesystemRange(endpoint, rootId, path,
+                            offset + copied, chunk, membership, trustedCa);
+                    if (result.totalSize != totalSize) {
+                        throw new java.io.IOException("Remote file size changed while it was open.");
+                    }
+                    if (result.bytes.length == 0) break;
+                    System.arraycopy(result.bytes, 0, data, copied, result.bytes.length);
+                    copied += result.bytes.length;
+                    if (result.bytes.length < chunk) break;
+                }
+                return copied;
+            } catch (ErrnoException error) {
+                throw error;
+            } catch (Exception error) {
+                ErrnoException failure = new ErrnoException("read", OsConstants.EIO);
+                failure.initCause(error);
+                throw failure;
+            }
+        }
+
+        @Override public void onRelease() { /* Each read opens and closes its own range stream. */ }
+    }
+
+    /**
+     * Staging-backed writable callback. Bytes are committed to the owner only on
+     * fsync/release; an interrupted edit leaves the original remote file intact.
+     */
+    private static final class FilesystemWriteCallback extends ProxyFileDescriptorCallback {
+        private final String endpoint, rootId, path, trustedCa;
+        private final Path staging;
+        private final NetworkMembershipClient membership;
+        private final CancellationSignal cancellation;
+        private boolean dirty;
+        private boolean released;
+
+        FilesystemWriteCallback(String endpoint, String rootId, String path, Path staging,
+                                NetworkMembershipClient membership, String trustedCa,
+                                CancellationSignal cancellation, boolean truncate) {
+            this.endpoint = endpoint; this.rootId = rootId; this.path = path; this.staging = staging;
+            this.membership = membership; this.trustedCa = trustedCa; this.cancellation = cancellation;
+            // A truncating open must publish the empty staging even if no bytes are written.
+            this.dirty = truncate;
+        }
+
+        @Override public synchronized long onGetSize() throws ErrnoException {
+            try { return Files.size(staging); }
+            catch (Exception error) { throw failure("getattr", error); }
+        }
+
+        @Override public synchronized int onRead(long offset, int size, byte[] data) throws ErrnoException {
+            if (offset < 0 || size < 0) throw new ErrnoException("read", OsConstants.EINVAL);
+            if (size == 0) return 0;
+            if (cancellation != null && cancellation.isCanceled()) throw new ErrnoException("read", OsConstants.ECANCELED);
+            try (java.nio.channels.FileChannel channel = java.nio.channels.FileChannel.open(staging,
+                    java.nio.file.StandardOpenOption.READ)) {
+                long fileSize = channel.size();
+                if (offset >= fileSize) return 0;
+                int requested = (int) Math.min((long) size, fileSize - offset);
+                java.nio.ByteBuffer buffer = java.nio.ByteBuffer.wrap(data, 0, requested);
+                channel.position(offset);
+                int total = 0;
+                while (buffer.hasRemaining()) {
+                    int read = channel.read(buffer);
+                    if (read < 0) break;
+                    total += read;
+                }
+                return total;
+            } catch (Exception error) { throw failure("read", error); }
+        }
+
+        @Override public synchronized int onWrite(long offset, int size, byte[] data) throws ErrnoException {
+            if (offset < 0 || size < 0) throw new ErrnoException("write", OsConstants.EINVAL);
+            if (size == 0) return 0;
+            if (cancellation != null && cancellation.isCanceled()) throw new ErrnoException("write", OsConstants.ECANCELED);
+            try (java.nio.channels.FileChannel channel = java.nio.channels.FileChannel.open(staging,
+                    java.nio.file.StandardOpenOption.WRITE)) {
+                channel.position(offset);
+                java.nio.ByteBuffer buffer = java.nio.ByteBuffer.wrap(data, 0, size);
+                while (buffer.hasRemaining()) channel.write(buffer);
+                dirty = true;
+                return size;
+            } catch (Exception error) { throw failure("write", error); }
+        }
+
+        @Override public synchronized void onFsync() throws ErrnoException { publish("fsync"); }
+
+        @Override public synchronized void onRelease() {
+            try { publish("release"); }
+            catch (ErrnoException ignored) { /* The original remote file remains intact. */ }
+            finally {
+                released = true;
+                try { Files.deleteIfExists(staging); } catch (Exception ignored) { }
+            }
+        }
+
+        private void publish(String operation) throws ErrnoException {
+            if (!dirty || released) return;
+            if (cancellation != null && cancellation.isCanceled()) {
+                throw new ErrnoException(operation, OsConstants.ECANCELED);
+            }
+            try {
+                NetworkPeerConnector.uploadFilesystemFile(endpoint, rootId, path, staging, true, "",
+                        membership, trustedCa, MAX_STAGED_BYTES);
+                dirty = false;
+            } catch (Exception error) { throw failure(operation, error); }
+        }
+
+        private static ErrnoException failure(String operation, Throwable error) {
+            ErrnoException failure = new ErrnoException(operation, OsConstants.EIO);
+            failure.initCause(error);
+            return failure;
+        }
     }
 }

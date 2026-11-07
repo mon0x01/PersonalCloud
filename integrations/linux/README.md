@@ -5,14 +5,14 @@ PersonalCloud's Linux integration is Java-first. The daemon and local-control cl
 ## Components
 
 - `personalcloudctl`: Java CLI over the owner-only Unix-domain control socket.
-- `personalcloud-mount`: launches the optional read-only Java FUSE2 adapter.
-- `fuse/`: JNR-FUSE adapter for `/Devices/<device>/References` and `/Devices/<device>/Distributed-Storage`.
+- `personalcloud-mount`: launches the optional writable Java FUSE2 adapter.
+- `fuse/`: JNR-FUSE adapter for `/Devices/<device>/References`, `/Devices/<device>/Distributed-Storage`, and writable `/Devices/<device>/Filesystem`.
 - `personalcloud-dolphin-reference`: KDE Dolphin action to register a selected directory in place.
 - `personalcloud-dolphin-place-file`: KDE Dolphin action to choose an online member and send a whole file to its managed storage.
 - `personalcloud-dolphin-share-file`: KDE Dolphin action to share one selected file by reference without copying it.
 - `install-dolphin-actions.sh`: installs the three actions under the user's KIO service-menu directory.
 
-The virtual filesystem is deliberately read-only. It supports bounded random-access reads for remote files, rejects all filesystem mutations, and distinguishes stale offline catalogue entries from available content. Offline metadata remains browseable when cached; opening the unavailable file fails instead of returning stale bytes.
+The reference and managed planes are deliberately read-only. They support bounded random-access reads for remote files, reject filesystem mutations there, and distinguish stale offline catalogue entries from available content. Eligible storage under `/Devices/<device>/Filesystem/<root>/...` is writable for active remote members: create, write, mkdir, rename/move, truncate and delete are authorized and executed by the owning peer. Writes are staged in the system temporary directory and published only after a complete SHA-256-verified upload, so an interrupted write never truncates or corrupts the owner's original file. No-overwrite commits and non-replacing renames prevent unintended replacement. `chmod`, `chown`, `mknod`, links, xattrs and `fallocate` fail closed on writable paths; `utimens` is a documented no-op. Offline metadata remains browseable when cached; opening or mutating unavailable content fails instead of returning stale bytes.
 
 ## Build the core
 
@@ -36,7 +36,7 @@ Then build it from the project root:
 ./integrations/linux/build-fuse.sh
 ```
 
-The build creates `integrations/linux/fuse/target/personalcloud-linux-fuse-0.2.0.jar` with its Java dependencies bundled. FUSE2 (`libfuse.so.2`) must be present at runtime and `/dev/fuse` must be accessible to the user. The mount is read-only and uses `nodev,nosuid,noexec`.
+The build creates `integrations/linux/fuse/target/personalcloud-linux-fuse-0.2.0.jar` with its Java dependencies bundled. FUSE2 (`libfuse.so.2`) must be present at runtime and `/dev/fuse` must be accessible to the user. The mount uses `default_permissions,nodev,nosuid,noexec`; only the eligible-storage subtree is writable.
 
 Start the PersonalCloud node first. Then mount the namespace with:
 
@@ -85,7 +85,7 @@ Downloads use bounded chunks, verify source size and modification timestamp, com
 
 ## Validation status
 
-The Java-only virtual-filesystem facade is compiled and covered by the core automated test suite (normalization, traversal rejection, metadata, offline behavior, and exact bounded reads). The JNR-FUSE adapter compiled successfully on Arch Linux against JNR-FUSE 0.5.8 after installing FUSE2 development headers (2026-11-04). Its Maven build now resolves the core JAR from a project-local Maven repository rather than the deprecated system scope. A real kernel mount, live callback exercise and Dolphin interaction remain production-readiness acceptance tests.
+The Java-only virtual-filesystem facade is compiled and covered by the core automated test suite (normalization, traversal rejection, metadata, offline behavior, exact bounded reads, eligible-storage write-back, no-overwrite conflicts, concurrent writers and symlink escapes). The JNR-FUSE adapter compiles on Arch Linux against JNR-FUSE 0.5.8 and its shaded JAR passes the non-mounting `--help` smoke test. A real kernel mount, live callback exercise and Dolphin interaction remain production-readiness acceptance tests.
 
 
 ### Building the optional FUSE adapter

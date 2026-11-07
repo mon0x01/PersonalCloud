@@ -131,6 +131,8 @@ Remote modifications operate on the owner's actual file through a safe, authenti
 - **Desktop Linux:** writable filesystem integration (FUSE or equivalent native mount) over the authenticated peer protocol.
 - **Android:** the platform-equivalent document provider with create, write, rename, move, and delete support.
 
+The M3 implementation exposes writable eligible storage at `/Devices/<device>/Filesystem/<root>/...` on Linux and `Filesystem/<root>/...` in the Android provider. The existing `References` and `Distributed-Storage` planes remain read-only. Native adapters never write to remote storage directly: every mutation is authorized and executed by the owning peer. Writes are staged locally and published only after a complete SHA-256-verified upload, so an interrupted or failed write does not truncate or corrupt the original file. No-overwrite publication rejects conflicting commits, and rename/move refuses to replace an existing destination. `chmod`, `chown`, `mknod`, links, extended attributes and `fallocate` fail closed on writable paths; `utimens` is a documented no-op because the owner controls metadata.
+
 ---
 
 ## 4. Privacy and protected resources
@@ -317,15 +319,15 @@ This section records the status at the latest completed milestone and is updated
 - Managed plane: network-wide listing/stat/download/delete, staging, no-overwrite commit, resumable chunked transfer, commit tombstones.
 - Upload/download atomicity, multi-process state consistency, symlink/path-traversal rejection.
 - Android peer-core parity and desktop–Android interoperability (simulated).
-- Linux read-only FUSE adapter source and Dolphin actions (compiled in CI; live mount pending).
-- Android app APK assembly in CI; source-level DocumentsProvider/SAF contracts.
+- Linux writable FUSE adapter source and Dolphin actions (compiled and launch-smoke-tested in CI; live kernel mount pending).
+- Android debug APK assembly in CI; writable DocumentsProvider and SAF source contracts.
 - Direct connectivity diagnostics.
 - Owner policy foundation: persistent NORMAL/PRIVATE/PROTECTED rules, policy epoch, owner-only local control/CLI management, and short-lived single-use protection approvals.
 - Eligible-root filesystem access (M2): owner consent, OS-user ownership boundaries, system/credential/PersonalCloud-state exclusions, signed `/network/fs/*` browse/stat/bounded-range/download/create/write/move/delete routes, source-side PRIVATE hiding and PROTECTED approval enforcement, atomic SHA-256-verified writes, no-overwrite publication, and separate source/destination approvals for protected moves.
+- Writable native integration (M3): Linux FUSE create/write/read/mkdir/rename/delete/truncate with safe staging and flush/release publication; Android DocumentsProvider create/write/rename/move/delete through signed owner-authorized calls; native-adapter tests for round trips, no-overwrite conflicts, concurrent writers, failed/rejected commits, traversal and symlink escapes, PRIVATE/PROTECTED enforcement and consent revocation.
 
 ### 9.2 Target functionality not yet implemented
 
-- Writable Linux FUSE and writable Android DocumentsProvider.
 - Third-device transfer coordination (Z initiates X→Y).
 - Safe cross-device move service with crash recovery and partial-outcome reporting.
 - Delegated admission capability (`ADMIT`) and signed revocation records with epochs.
@@ -341,6 +343,10 @@ This section records the status at the latest completed milestone and is updated
 - The OS-user ownership boundary checks the eligible root itself and rejects shared home parents such as `/home` and `/Users`. It does not enumerate every user home beneath an arbitrary owner-controlled volume.
 - Remote range reads recompute the full-file digest on each request.
 - Directory moves and recursive deletes refuse trees containing PRIVATE/PROTECTED rules or excluded credential paths; per-descendant approval is not yet available.
+- Native adapters stage write-back locally: Linux uses the system temporary directory; Android uses a proxy staging file capped at 512 MiB for editable files. Larger files remain readable but cannot be edited in place.
+- FUSE `utimens` is a documented no-op; `chmod`, `chown`, `mknod`, links, xattrs and `fallocate` fail closed on writable paths.
+- Rename/move refuses to replace an existing destination to avoid unintended overwrites; applications must delete the destination first.
+- Android DocumentsProvider writable operations require an active membership and a reachable owner; there is no offline write queue.
 - No live Linux FUSE mount/kernel callback validation.
 - No physical Android device/lifecycle/SAF validation.
 - No root succession/rotation (deferred by decision).

@@ -7,6 +7,8 @@ import dev.personalcloud.core.GrantService;
 import dev.personalcloud.core.PeerService;
 import dev.personalcloud.core.StateStore;
 import dev.personalcloud.core.VersionService;
+import dev.personalcloud.control.LocalControlClient;
+import dev.personalcloud.control.LocalControlServer;
 import dev.personalcloud.policy.FilesystemPolicyService;
 import dev.personalcloud.policy.PolicyMode;
 import dev.personalcloud.policy.ProtectionApprovalService;
@@ -16,6 +18,8 @@ import dev.personalcloud.storage.ManagedStorageService;
 import dev.personalcloud.storage.ReferenceGrantService;
 import dev.personalcloud.storage.ReferenceStorageService;
 import dev.personalcloud.storage.ReferenceVersionService;
+import dev.personalcloud.storage.ReferenceFileSystemModel;
+import dev.personalcloud.storage.WritableVirtualFilesystem;
 
 import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
@@ -31,6 +35,7 @@ public final class EligibleStorageIntegrationTest {
         Path workspace = Files.createTempDirectory("personalcloud-filesystem-integration-");
         PeerProtocolServer rootServer = null;
         PeerProtocolServer destinationServer = null;
+        LocalControlServer rootControl = null;
         FileService rootFiles = null;
         FileService destinationFiles = null;
         char[] password = "Correct-Horse-2026".toCharArray();
@@ -212,12 +217,165 @@ public final class EligibleStorageIntegrationTest {
             check(!Files.exists(protectedDirectory.resolve("plan.txt")),
                     "an approved remote delete must remove the original file");
 
+            // The native-adapter plane must use the same owner-side authorization:
+            // local control commands drive signed remote operations, never local disk.
+            Path rootEligible = Files.createDirectory(workspace.resolve("root-eligible"));
+            DeviceCatalogueService rootCatalogue = new DeviceCatalogueService(rootConfig, rootMembership);
+            ReferenceGrantService rootGrantService = new ReferenceGrantService(rootState, rootReferences, rootMembership);
+            ReferenceVersionService rootVersionService = new ReferenceVersionService(rootData, rootReferences);
+            ManagedStorageService rootManaged = new ManagedStorageService(rootState, rootConfig);
+            FilesystemPolicyService rootPolicy = new FilesystemPolicyService(rootState);
+            ProtectionApprovalService rootApprovals = new ProtectionApprovalService();
+            EligibleStorageService rootFilesystem = new EligibleStorageService(rootConfig, rootState,
+                    rootPolicy, rootApprovals, List.of(rootEligible));
+            rootControl = new LocalControlServer(rootData, rootConfig.nodeId(), rootConfig.nodeName(),
+                    rootReferences, rootConfig, rootPeers, rootLegacyGrants, rootMembership, rootCatalogue,
+                    rootGrantService, rootVersionService, rootManaged, rootPolicy, rootApprovals, rootFilesystem);
+            rootControl.start();
+            LocalControlClient control = new LocalControlClient(rootControl.socketPath());
+            WritableVirtualFilesystem nativeFilesystem =
+                    new WritableVirtualFilesystem(new ReferenceFileSystemModel(control), control);
+
+            check(nativeFilesystem.list("/").equals(List.of("Devices")),
+                    "native adapter must expose the Devices root");
+            check(nativeFilesystem.list("/Devices").contains("Filesystem Destination"),
+                    "native adapter must expose the remote device");
+            check(nativeFilesystem.list("/Devices/Filesystem Destination").contains("Filesystem"),
+                    "native adapter must expose the writable eligible-storage subtree");
+            List<String> nativeRoots = nativeFilesystem.list("/Devices/Filesystem Destination/Filesystem");
+            check(nativeRoots.size() == 1, "native adapter must list exactly one consented eligible root");
+            String nativeRoot = "/Devices/Filesystem Destination/Filesystem/" + nativeRoots.get(0);
+            check(nativeFilesystem.attributes(nativeRoot).directory(), "eligible root must be a directory");
+            check(nativeFilesystem.list(nativeRoot).contains("Documents"),
+                    "native adapter must browse the owner's actual eligible directory");
+            check(nativeFilesystem.exists(nativeRoot + "/Documents/report.txt"),
+                    "native adapter must report an existing owner file");
+            check(!nativeFilesystem.exists(nativeRoot + "/Documents/missing.txt"),
+                    "native adapter must report a missing owner file honestly");
+            expectFailure(() -> nativeFilesystem.attributes(nativeRoot + "/Documents/missing.txt"),
+                    "native stat must report a missing owner file as not found");
+            expectFailure(() -> nativeFilesystem.list(nativeRoot + "/missing-directory"),
+                    "native browse must report a missing owner directory as not found");
+
+            nativeFilesystem.createDirectory(nativeRoot + "/Native");
+            check(Files.isDirectory(eligible.resolve("Native")),
+                    "native mkdir must create the directory on the owner's filesystem");
+            Path nativeStaging = nativeFilesystem.createStaging();
+            Files.writeString(nativeStaging, "native write payload", StandardCharsets.UTF_8);
+            nativeFilesystem.upload(nativeRoot + "/Native/native.txt", nativeStaging, false);
+            nativeFilesystem.deleteStaging(nativeStaging);
+            check(Files.readString(eligible.resolve("Native/native.txt"), StandardCharsets.UTF_8)
+                            .equals("native write payload"),
+                    "native write-back must publish exact bytes to the owner's original path");
+            check(new String(nativeFilesystem.read(nativeRoot + "/Native/native.txt", 7, 5),
+                    StandardCharsets.UTF_8).equals("write"),
+                    "native adapter must perform bounded remote range reads");
+            nativeFilesystem.move(nativeRoot + "/Native/native.txt", nativeRoot + "/Native/renamed.txt");
+            check(Files.exists(eligible.resolve("Native/renamed.txt"))
+                            && !Files.exists(eligible.resolve("Native/native.txt")),
+                    "native rename must move the owner's original file");
+            nativeFilesystem.delete(nativeRoot + "/Native/renamed.txt", false);
+            check(!Files.exists(eligible.resolve("Native/renamed.txt")),
+                    "native delete must remove the owner's original file");
+            nativeFilesystem.delete(nativeRoot + "/Native", false);
+            check(!Files.exists(eligible.resolve("Native")),
+                    "native rmdir must remove the owner's empty directory");
+
+            nativeFilesystem.createDirectory(nativeRoot + "/Native");
+            // Conflicting no-overwrite commits must never replace or partially corrupt a file.
+            Path conflictStaging = nativeFilesystem.createStaging();
+            Files.writeString(conflictStaging, "first writer", StandardCharsets.UTF_8);
+            nativeFilesystem.upload(nativeRoot + "/Native/conflict.txt", conflictStaging, false);
+            Files.writeString(conflictStaging, "second writer", StandardCharsets.UTF_8);
+            expectFailure(() -> nativeFilesystem.upload(nativeRoot + "/Native/conflict.txt", conflictStaging, false),
+                    "native no-overwrite commit must reject a conflicting existing file");
+            check(Files.readString(eligible.resolve("Native/conflict.txt"), StandardCharsets.UTF_8)
+                            .equals("first writer"),
+                    "a rejected conflicting write must leave the original bytes intact");
+
+            // Two concurrent no-overwrite commits: exactly one wins and the result is never mixed.
+            Path concurrentA = nativeFilesystem.createStaging();
+            Path concurrentB = nativeFilesystem.createStaging();
+            Files.writeString(concurrentA, "concurrent A payload", StandardCharsets.UTF_8);
+            Files.writeString(concurrentB, "concurrent B payload", StandardCharsets.UTF_8);
+            java.util.concurrent.atomic.AtomicInteger successfulCommits = new java.util.concurrent.atomic.AtomicInteger();
+            Thread writerA = new Thread(() -> {
+                try { nativeFilesystem.upload(nativeRoot + "/Native/concurrent.txt", concurrentA, false);
+                    successfulCommits.incrementAndGet(); } catch (Exception ignored) { }
+            });
+            Thread writerB = new Thread(() -> {
+                try { nativeFilesystem.upload(nativeRoot + "/Native/concurrent.txt", concurrentB, false);
+                    successfulCommits.incrementAndGet(); } catch (Exception ignored) { }
+            });
+            writerA.start(); writerB.start(); writerA.join(10_000); writerB.join(10_000);
+            check(successfulCommits.get() == 1, "exactly one concurrent no-overwrite commit must succeed");
+            String concurrent = Files.readString(eligible.resolve("Native/concurrent.txt"), StandardCharsets.UTF_8);
+            check(concurrent.equals("concurrent A payload") || concurrent.equals("concurrent B payload"),
+                    "concurrent writes must never publish mixed or partial content");
+            nativeFilesystem.deleteStaging(conflictStaging);
+            nativeFilesystem.deleteStaging(concurrentA);
+            nativeFilesystem.deleteStaging(concurrentB);
+            nativeFilesystem.delete(nativeRoot + "/Native/conflict.txt", false);
+            nativeFilesystem.delete(nativeRoot + "/Native/concurrent.txt", false);
+
+            // Traversal and symlink escape attempts must fail closed.
+            expectFailure(() -> nativeFilesystem.createDirectory(nativeRoot + "/../Escape"),
+                    "native paths must reject parent-directory traversal");
+            Path outside = Files.createDirectory(workspace.resolve("outside-eligible"));
+            Files.writeString(outside.resolve("secret.txt"), "outside secret", StandardCharsets.UTF_8);
+            Files.createSymbolicLink(eligible.resolve("outside-link"), outside);
+            expectFailure(() -> nativeFilesystem.list(nativeRoot + "/outside-link"),
+                    "native browsing must not follow symlinks outside eligible storage");
+            Path symlinkStaging = nativeFilesystem.createStaging();
+            Files.writeString(symlinkStaging, "escape", StandardCharsets.UTF_8);
+            expectFailure(() -> nativeFilesystem.upload(nativeRoot + "/outside-link/secret.txt",
+                            symlinkStaging, true),
+                    "native writes must not follow symlinks outside eligible storage");
+            check(Files.readString(outside.resolve("secret.txt"), StandardCharsets.UTF_8)
+                            .equals("outside secret"),
+                    "a rejected symlink escape must leave the outside file intact");
+            nativeFilesystem.deleteStaging(symlinkStaging);
+            Files.delete(eligible.resolve("outside-link"));
+            nativeFilesystem.delete(nativeRoot + "/Native", false);
+
+            destinationPolicy.set(rootId, "Documents/report.txt", PolicyMode.PROTECTED);
+            Path protectedStaging = nativeFilesystem.createStaging();
+            Files.writeString(protectedStaging, "blocked overwrite", StandardCharsets.UTF_8);
+            expectFailure(() -> nativeFilesystem.upload(nativeRoot + "/Documents/report.txt",
+                            protectedStaging, true),
+                    "native writes must not bypass PROTECTED owner approval");
+            nativeFilesystem.deleteStaging(protectedStaging);
+            check(Files.readString(documents.resolve("report.txt"), StandardCharsets.UTF_8)
+                            .equals("original remote file"),
+                    "a blocked protected overwrite must leave the original bytes intact");
+            destinationPolicy.remove(rootId, "Documents/report.txt");
+
+            destinationPolicy.set(rootId, "Private", PolicyMode.PRIVATE);
+            expectFailure(() -> nativeFilesystem.list(nativeRoot + "/Private"),
+                    "native browsing must not expose PRIVATE directories");
+            destinationPolicy.remove(rootId, "Private");
+
+            destinationFilesystem.revokeConsent();
+            expectFailure(() -> nativeFilesystem.list(nativeRoot),
+                    "native operations must fail immediately after consent revocation");
+            Path revokedStaging = nativeFilesystem.createStaging();
+            Files.writeString(revokedStaging, "revoked write", StandardCharsets.UTF_8);
+            expectFailure(() -> nativeFilesystem.upload(nativeRoot + "/Documents/revoked.txt", revokedStaging, false),
+                    "native writes must fail after consent revocation");
+            check(!Files.exists(documents.resolve("revoked.txt")),
+                    "a revoked native write must not create the owner file");
+            nativeFilesystem.deleteStaging(revokedStaging);
+            destinationFilesystem.grantConsent();
+            check(nativeFilesystem.list(nativeRoot).contains("Documents"),
+                    "native operations must resume only after explicit consent is restored");
+
             destinationFilesystem.revokeConsent();
             boolean consentDenied = false;
             try { client.listFilesystemRoots(destinationUrl, rootMembership); }
             catch (java.io.IOException expected) { consentDenied = true; }
             check(consentDenied, "revoking consent must disable remote filesystem access immediately");
         } finally {
+            if (rootControl != null) rootControl.close();
             if (rootServer != null) rootServer.close();
             if (destinationServer != null) destinationServer.close();
             if (rootFiles != null) rootFiles.close();
@@ -228,7 +386,7 @@ public final class EligibleStorageIntegrationTest {
                 });
             }
         }
-        System.out.println("PASS: authenticated direct filesystem roots, browse/stat/download/write, private/protected enforcement, owner approvals and consent revocation.");
+        System.out.println("PASS: authenticated direct filesystem roots, browse/stat/download/write, private/protected enforcement, owner approvals, consent revocation, and native-adapter concurrency, no-overwrite, traversal and symlink protections.");
     }
 
     private static AppConfig config(String nodeId, String nodeName, Path data, Path storage, int port) {

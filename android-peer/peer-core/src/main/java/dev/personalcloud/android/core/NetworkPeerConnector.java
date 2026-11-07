@@ -133,6 +133,88 @@ public final class NetworkPeerConnector {
         return PeerConnector.readSignedRange(endpoint, path, offset, length, membership, trustedCaPath);
     }
 
+    public static List<Map<String,Object>> listFilesystemRoots(String endpoint,
+                                                               NetworkMembershipClient membership,
+                                                               String trustedCaPath) throws Exception {
+        Object value = get(endpoint, "/network/fs/roots", membership, trustedCaPath).get("roots");
+        return rows(value, "eligible filesystem roots");
+    }
+
+    public static List<Map<String,Object>> browseFilesystem(String endpoint, String rootId, String relativePath,
+                                                             NetworkMembershipClient membership,
+                                                             String trustedCaPath) throws Exception {
+        Object value = get(endpoint, filesystemPath(rootId, "entries", relativePath),
+                membership, trustedCaPath).get("entries");
+        return rows(value, "eligible filesystem entries");
+    }
+
+    public static Map<String,Object> statFilesystem(String endpoint, String rootId, String relativePath,
+                                                    NetworkMembershipClient membership,
+                                                    String trustedCaPath) throws Exception {
+        return get(endpoint, filesystemPath(rootId, "stat", relativePath), membership, trustedCaPath);
+    }
+
+    public static PeerConnector.RangeResult readFilesystemRange(String endpoint, String rootId, String relativePath,
+                                                                 long offset, int length,
+                                                                 NetworkMembershipClient membership,
+                                                                 String trustedCaPath) throws Exception {
+        String path = filesystemPath(rootId, "content", relativePath) + "&offset=" + offset + "&length=" + length;
+        return PeerConnector.readSignedRange(endpoint, path, offset, length, membership, trustedCaPath);
+    }
+
+    public static Map<String,Object> createFilesystemDirectory(String endpoint, String rootId, String relativePath,
+                                                                NetworkMembershipClient membership,
+                                                                String trustedCaPath) throws Exception {
+        Map<String,Object> body = new LinkedHashMap<>();
+        body.put("path", relativePath == null ? "" : relativePath);
+        String path = "/network/fs/" + encodePath(rootId) + "/directories";
+        return PeerConnector.postSignedJson(endpoint, path, body,
+                membership.createAuthHeaders("POST", path, Json.stringify(body).getBytes(StandardCharsets.UTF_8)),
+                trustedCaPath);
+    }
+
+    public static Map<String,Object> moveFilesystemEntry(String endpoint, String rootId, String from, String to,
+                                                          boolean overwrite, String approvalId,
+                                                          NetworkMembershipClient membership,
+                                                          String trustedCaPath) throws Exception {
+        Map<String,Object> body = new LinkedHashMap<>();
+        body.put("from", from);
+        body.put("to", to);
+        body.put("overwrite", overwrite);
+        body.put("approvalId", approvalId == null ? "" : approvalId);
+        body.put("destinationApprovalId", "");
+        String path = "/network/fs/" + encodePath(rootId) + "/move";
+        return PeerConnector.postSignedJson(endpoint, path, body,
+                membership.createAuthHeaders("POST", path, Json.stringify(body).getBytes(StandardCharsets.UTF_8)),
+                trustedCaPath);
+    }
+
+    public static Map<String,Object> deleteFilesystemEntry(String endpoint, String rootId, String relativePath,
+                                                            boolean recursive, String approvalId,
+                                                            NetworkMembershipClient membership,
+                                                            String trustedCaPath) throws Exception {
+        String path = "/network/fs/" + encodePath(rootId) + "/entry?path=" + encodePath(relativePath)
+                + "&recursive=" + recursive + "&approvalId=" + encodePath(approvalId);
+        return delete(endpoint, path, membership, trustedCaPath);
+    }
+
+    public static Map<String,Object> uploadFilesystemFile(String endpoint, String rootId, String relativePath,
+                                                           java.nio.file.Path source, boolean overwrite,
+                                                           String approvalId,
+                                                           NetworkMembershipClient membership,
+                                                           String trustedCaPath, long maximumBytes) throws Exception {
+        return PeerConnector.putSignedFilesystemFile(endpoint, rootId, relativePath, source, overwrite, approvalId,
+                membership, trustedCaPath, maximumBytes);
+    }
+
+    private static String filesystemPath(String rootId, String action, String relativePath) {
+        return "/network/fs/" + encodePath(rootId) + "/" + action + "?path=" + encodePath(relativePath);
+    }
+
+    private static String encodePath(String value) {
+        return encode(value == null ? "" : value).replace("+", "%20");
+    }
+
     public static String activeEndpoint(NetworkMembershipClient membership, String memberId) {
         if (!membership.isActiveMember(memberId)) throw new SecurityException("The requested device is not an active network member.");
         for (Map<String, Object> row : membership.members()) {

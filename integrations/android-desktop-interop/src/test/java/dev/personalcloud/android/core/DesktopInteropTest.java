@@ -36,6 +36,13 @@ public final class DesktopInteropTest {
         Path desktopStorage = Files.createDirectory(workspace.resolve("desktop-storage"));
         Path desktopReferences = Files.createDirectory(workspace.resolve("desktop-references"));
         Path androidStorage = Files.createDirectory(workspace.resolve("android-storage"));
+        Path desktopEligible = Files.createDirectory(workspace.resolve("desktop-eligible"));
+        Path desktopEligibleDocs = Files.createDirectory(desktopEligible.resolve("Documents"));
+        Path desktopEligibleProtected = Files.createDirectory(desktopEligible.resolve("Protected"));
+        Files.writeString(desktopEligibleDocs.resolve("report.txt"), "desktop eligible original",
+                StandardCharsets.UTF_8);
+        Files.writeString(desktopEligibleProtected.resolve("plan.txt"), "desktop protected original",
+                StandardCharsets.UTF_8);
         Path desktopLog = workspace.resolve("desktop.log");
         Files.writeString(desktopStorage.resolve("desktop-owned.txt"), "Original file owned by desktop node", StandardCharsets.UTF_8);
         Files.writeString(desktopReferences.resolve("desktop-owned.txt"), "Referenced desktop file for Android", StandardCharsets.UTF_8);
@@ -62,6 +69,7 @@ public final class DesktopInteropTest {
             env.put("PERSONALCLOUD_PORT", Integer.toString(desktopPort));
             env.put("PERSONALCLOUD_DATA_DIR", desktopData.toString());
             env.put("PERSONALCLOUD_STORAGE_ROOT", desktopStorage.toString());
+            env.put("PERSONALCLOUD_ELIGIBLE_ROOTS", desktopEligible.toString());
             env.put("PERSONALCLOUD_TLS_KEYSTORE", desktopP12.toString());
             env.put("PERSONALCLOUD_TLS_KEYSTORE_PASSWORD", desktopPassword);
             env.put("PERSONALCLOUD_TLS_TRUSTSTORE", androidTruststore.toString());
@@ -75,6 +83,7 @@ public final class DesktopInteropTest {
             String desktopNodeId = String.valueOf(control.ping().get("nodeId"));
             String networkPassword = "NetworkInterop-2026!";
             control.networkBootstrap("Interop Private Network", "interop", networkPassword.toCharArray());
+            control.grantFilesystemConsent();
 
             SSLContext androidTls = serverTls(androidP12, androidPassword);
             MemoryStateStore androidState = new MemoryStateStore();
@@ -118,6 +127,137 @@ public final class DesktopInteropTest {
             check(Boolean.TRUE.equals(restoredMembership.status().get("joined"))
                     && androidMembership.identity().publicKeyBase64().equals(restoredMembership.identity().publicKeyBase64()),
                     "Android membership certificate and per-device identity must survive state-store restart");
+
+            // Android writes to the desktop owner's actual eligible filesystem through the
+            // same signed protocol; every mutation is authorized by the owning peer.
+            String desktopCa = desktopCertificate.toString();
+            List<Map<String,Object>> eligibleRoots = NetworkPeerConnector.listFilesystemRoots(
+                    desktopBase, androidMembership, desktopCa);
+            check(eligibleRoots.size() == 1, "Android must discover exactly one consented desktop eligible root");
+            String eligibleRootId = String.valueOf(eligibleRoots.get(0).get("rootId"));
+            List<Map<String,Object>> eligibleListing = NetworkPeerConnector.browseFilesystem(
+                    desktopBase, eligibleRootId, "", androidMembership, desktopCa);
+            check(eligibleListing.stream().anyMatch(row -> "Documents".equals(row.get("name"))),
+                    "Android must browse the owner's actual eligible directory");
+            Map<String,Object> eligibleStat = NetworkPeerConnector.statFilesystem(
+                    desktopBase, eligibleRootId, "Documents/report.txt", androidMembership, desktopCa);
+            check(((Number) eligibleStat.get("size")).longValue() == "desktop eligible original".length(),
+                    "Android must stat the owner's original file");
+            PeerConnector.RangeResult eligibleRange = NetworkPeerConnector.readFilesystemRange(
+                    desktopBase, eligibleRootId, "Documents/report.txt", 8, 8, androidMembership, desktopCa);
+            check(new String(eligibleRange.bytes, StandardCharsets.UTF_8).equals("eligible"),
+                    "Android must perform bounded signed range reads on eligible storage");
+
+            Path androidUpload = workspace.resolve("android-filesystem-write.txt");
+            byte[] filesystemUploadBytes = "written by the Android peer".getBytes(StandardCharsets.UTF_8);
+            Files.write(androidUpload, filesystemUploadBytes);
+            NetworkPeerConnector.uploadFilesystemFile(desktopBase, eligibleRootId, "Documents/android-write.txt",
+                    androidUpload, false, "", androidMembership, desktopCa, 10 * 1024 * 1024);
+            check(java.util.Arrays.equals(Files.readAllBytes(desktopEligibleDocs.resolve("android-write.txt")),
+                    filesystemUploadBytes), "Android write-back must publish exact bytes to the owner's path");
+
+            NetworkPeerConnector.createFilesystemDirectory(desktopBase, eligibleRootId, "AndroidDir",
+                    androidMembership, desktopCa);
+            check(Files.isDirectory(desktopEligible.resolve("AndroidDir")),
+                    "Android mkdir must create the directory on the owner's filesystem");
+            NetworkPeerConnector.moveFilesystemEntry(desktopBase, eligibleRootId, "AndroidDir",
+                    "AndroidDirRenamed", false, "", androidMembership, desktopCa);
+            check(Files.isDirectory(desktopEligible.resolve("AndroidDirRenamed"))
+                            && !Files.exists(desktopEligible.resolve("AndroidDir")),
+                    "Android rename must move the owner's original directory");
+            NetworkPeerConnector.deleteFilesystemEntry(desktopBase, eligibleRootId, "AndroidDirRenamed",
+                    true, "", androidMembership, desktopCa);
+            check(!Files.exists(desktopEligible.resolve("AndroidDirRenamed")),
+                    "Android delete must remove the owner's original directory");
+            NetworkPeerConnector.deleteFilesystemEntry(desktopBase, eligibleRootId, "Documents/android-write.txt",
+                    false, "", androidMembership, desktopCa);
+            check(!Files.exists(desktopEligibleDocs.resolve("android-write.txt")),
+                    "Android delete must remove the owner's original file");
+
+            boolean traversalDenied = false;
+            try {
+                NetworkPeerConnector.statFilesystem(desktopBase, eligibleRootId, "../outside.txt",
+                        androidMembership, desktopCa);
+            } catch (Exception expected) { traversalDenied = true; }
+            check(traversalDenied, "Android must reject parent-directory traversal at the owner");
+
+            Path desktopOutside = Files.createDirectory(workspace.resolve("desktop-outside-eligible"));
+            Files.writeString(desktopOutside.resolve("secret.txt"), "outside secret", StandardCharsets.UTF_8);
+            Files.createSymbolicLink(desktopEligible.resolve("outside-link"), desktopOutside);
+            boolean symlinkBrowseDenied = false;
+            try {
+                NetworkPeerConnector.browseFilesystem(desktopBase, eligibleRootId, "outside-link",
+                        androidMembership, desktopCa);
+            } catch (Exception expected) { symlinkBrowseDenied = true; }
+            check(symlinkBrowseDenied, "Android must not follow owner symlinks outside eligible storage");
+            boolean symlinkWriteDenied = false;
+            try {
+                NetworkPeerConnector.uploadFilesystemFile(desktopBase, eligibleRootId,
+                        "outside-link/secret.txt", androidUpload, true, "",
+                        androidMembership, desktopCa, 10 * 1024 * 1024);
+            } catch (Exception expected) { symlinkWriteDenied = true; }
+            check(symlinkWriteDenied && Files.readString(desktopOutside.resolve("secret.txt"),
+                            StandardCharsets.UTF_8).equals("outside secret"),
+                    "Android writes must not follow symlinks or corrupt outside files");
+            Files.delete(desktopEligible.resolve("outside-link"));
+
+            Path concurrentAndroidA = workspace.resolve("android-concurrent-a.txt");
+            Path concurrentAndroidB = workspace.resolve("android-concurrent-b.txt");
+            Files.writeString(concurrentAndroidA, "android concurrent A", StandardCharsets.UTF_8);
+            Files.writeString(concurrentAndroidB, "android concurrent B", StandardCharsets.UTF_8);
+            java.util.concurrent.atomic.AtomicInteger androidWins = new java.util.concurrent.atomic.AtomicInteger();
+            Thread androidWriterA = new Thread(() -> {
+                try { NetworkPeerConnector.uploadFilesystemFile(desktopBase, eligibleRootId,
+                        "Documents/android-concurrent.txt", concurrentAndroidA, false, "",
+                        androidMembership, desktopCa, 10 * 1024 * 1024); androidWins.incrementAndGet(); }
+                catch (Exception ignored) { }
+            });
+            Thread androidWriterB = new Thread(() -> {
+                try { NetworkPeerConnector.uploadFilesystemFile(desktopBase, eligibleRootId,
+                        "Documents/android-concurrent.txt", concurrentAndroidB, false, "",
+                        androidMembership, desktopCa, 10 * 1024 * 1024); androidWins.incrementAndGet(); }
+                catch (Exception ignored) { }
+            });
+            androidWriterA.start(); androidWriterB.start();
+            androidWriterA.join(10_000); androidWriterB.join(10_000);
+            check(androidWins.get() == 1, "exactly one concurrent Android no-overwrite commit must succeed");
+            String androidConcurrent = Files.readString(desktopEligibleDocs.resolve("android-concurrent.txt"),
+                    StandardCharsets.UTF_8);
+            check(androidConcurrent.equals("android concurrent A")
+                            || androidConcurrent.equals("android concurrent B"),
+                    "concurrent Android writes must never publish mixed or partial content");
+            NetworkPeerConnector.deleteFilesystemEntry(desktopBase, eligibleRootId,
+                    "Documents/android-concurrent.txt", false, "", androidMembership, desktopCa);
+
+            control.setPolicy(eligibleRootId, "Protected", "PROTECTED");
+            boolean protectedWriteDenied = false;
+            try {
+                NetworkPeerConnector.uploadFilesystemFile(desktopBase, eligibleRootId, "Protected/plan.txt",
+                        androidUpload, true, "", androidMembership, desktopCa, 10 * 1024 * 1024);
+            } catch (Exception expected) { protectedWriteDenied = true; }
+            check(protectedWriteDenied && Files.readString(desktopEligibleProtected.resolve("plan.txt"),
+                            StandardCharsets.UTF_8).equals("desktop protected original"),
+                    "Android must not bypass PROTECTED owner approval or corrupt the original file");
+            control.removePolicy(eligibleRootId, "Protected");
+
+            control.setPolicy(eligibleRootId, "Protected", "PRIVATE");
+            boolean privateBrowseDenied = false;
+            try {
+                NetworkPeerConnector.browseFilesystem(desktopBase, eligibleRootId, "Protected",
+                        androidMembership, desktopCa);
+            } catch (Exception expected) { privateBrowseDenied = true; }
+            check(privateBrowseDenied, "Android must not browse PRIVATE directories");
+            control.removePolicy(eligibleRootId, "Protected");
+
+            control.revokeFilesystemConsent();
+            boolean revokedAccessDenied = false;
+            try {
+                NetworkPeerConnector.listFilesystemRoots(desktopBase, androidMembership, desktopCa);
+            } catch (Exception expected) { revokedAccessDenied = true; }
+            check(revokedAccessDenied, "consent revocation must disable Android eligible-storage access immediately");
+            control.grantFilesystemConsent();
+            check(NetworkPeerConnector.listFilesystemRoots(desktopBase, androidMembership, desktopCa).size() == 1,
+                    "Android access must resume only after explicit consent is restored");
 
             // A SAF-backed adapter exposes existing provider-owned bytes without importing them into app storage.
             Map<String,Object> safGrant = android.grantExternalNetworkReference(desktopNodeId,
@@ -451,7 +591,7 @@ public final class DesktopInteropTest {
             catch (java.io.IOException expected) { desktopOutgoingRevoked = true; }
             check(desktopOutgoingRevoked, "Android incoming revocation must invalidate the desktop's old token");
 
-            System.out.println("PASS: Android approval-gated private-network enrollment against desktop; signed certificate verification; catalogue sync; signed heartbeat; membership identity persistence; replay rejection; signed-member Android reference listing/browse/stat/download/range/delete; Android owner recovery snapshots; direct managed placement/list/download/range/delete; no-overwrite behavior; legacy reciprocal pairing compatibility; independent peer revocation.");
+            System.out.println("PASS: Android approval-gated private-network enrollment against desktop; signed certificate verification; catalogue sync; signed heartbeat; membership identity persistence; replay rejection; signed-member Android reference listing/browse/stat/download/range/delete; Android owner recovery snapshots; direct managed placement/list/download/range/delete; writable eligible filesystem browse/stat/range/write/mkdir/rename/delete with PRIVATE, PROTECTED and consent enforcement; no-overwrite behavior; legacy reciprocal pairing compatibility; independent peer revocation.");
         } finally {
             if (android != null) {
                 Thread closer = new Thread(android::close, "personalcloud-interop-android-close");

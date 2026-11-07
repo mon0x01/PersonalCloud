@@ -17,7 +17,7 @@ The Android application is an independent PersonalCloud node, not a web-dashboar
 
 ## Android app integration source
 
-`app/src/main/java/dev/personalcloud/android/PersonalCloudDocumentsProvider.java` is registered as a `DocumentsProvider`. It exposes phone-owned managed storage, local SAF references, and signed-network members' `References` and `Distributed-Storage`. Remote opens use seekable proxy descriptors backed by authenticated byte-range reads. Cached metadata remains visible when a member is offline but is labelled unavailable. Mutations are rejected except the explicit owner-authorized deletion operations.
+`app/src/main/java/dev/personalcloud/android/PersonalCloudDocumentsProvider.java` is registered as a `DocumentsProvider`. It exposes phone-owned managed storage, local SAF references, and signed-network members' `References`, `Distributed-Storage` and writable `Filesystem` eligible storage. Remote opens use seekable proxy descriptors backed by authenticated byte-range reads. Cached metadata remains visible when a member is offline but is labelled unavailable. Existing reference and managed operations remain unchanged; eligible-storage documents support create, write, rename, move and delete through signed owner-enforced calls. Writable files are staged locally and published only after a complete digest-verified upload; edits above the 512 MiB staging cap remain readable but cannot be modified in place.
 
 `AndroidSafReferenceStore` adds in-place references through Android's Storage Access Framework:
 

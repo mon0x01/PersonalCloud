@@ -133,6 +133,34 @@ public final class ReferenceFileSystemModel {
     }
 
     /**
+     * Device rows for native adapters that add additional per-device subtrees. The
+     * display name is the stable kernel path segment; node identity is never guessed
+     * from it.
+     */
+    public synchronized List<Map<String, Object>> deviceRows() throws IOException {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Device device : devices()) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("nodeId", device.nodeId());
+            row.put("name", device.name());
+            row.put("displayName", device.displayName());
+            row.put("local", device.local());
+            row.put("online", device.online());
+            row.put("active", device.active());
+            rows.add(row);
+        }
+        return List.copyOf(rows);
+    }
+
+    /** Resolves a kernel-visible device display name, failing closed when it is unknown. */
+    public synchronized Map<String, Object> requireDeviceRow(String displayName) throws IOException {
+        for (Map<String, Object> row : deviceRows()) {
+            if (String.valueOf(row.get("displayName")).equals(displayName)) return row;
+        }
+        throw new NoSuchFileException(displayName);
+    }
+
+    /**
      * Global metadata search; content is never indexed or read during search. Results from
      * unreachable members are returned only from the last successful exact-query cache and are
      * explicitly marked stale/unavailable. This avoids presenting cached metadata as live data.

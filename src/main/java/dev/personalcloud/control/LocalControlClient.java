@@ -534,6 +534,118 @@ public final class LocalControlClient {
         }
     }
 
+    @SuppressWarnings("unchecked")
+    public List<Map<String, Object>> listRemoteFilesystemRoots(String memberId) throws IOException {
+        Object rows = request("filesystem.remote.roots",
+                fields("memberId", requireText(memberId, "Member ID"))).get("roots");
+        return rows(rows, "remote eligible-root list");
+    }
+
+    @SuppressWarnings("unchecked")
+    public List<Map<String, Object>> browseRemoteFilesystem(String memberId, String rootId, String relativePath)
+            throws IOException {
+        Object rows = request("filesystem.remote.browse", fields(
+                "memberId", requireText(memberId, "Member ID"),
+                "rootId", requireText(rootId, "Eligible root ID"),
+                "path", relativePath == null ? "" : relativePath)).get("entries");
+        return rows(rows, "remote eligible-storage directory");
+    }
+
+    public Map<String, Object> statRemoteFilesystem(String memberId, String rootId, String relativePath)
+            throws IOException {
+        return request("filesystem.remote.stat", fields(
+                "memberId", requireText(memberId, "Member ID"),
+                "rootId", requireText(rootId, "Eligible root ID"),
+                "path", relativePath == null ? "" : relativePath));
+    }
+
+    /** Reads a bounded range from a remote eligible-storage file through the owner-only control socket. */
+    public byte[] readRemoteFilesystemRange(String memberId, String rootId, String relativePath,
+                                            long offset, int length) throws IOException {
+        if (offset < 0) throw new IllegalArgumentException("Read offset cannot be negative.");
+        if (length < 0 || length > MAX_READ_BYTES) {
+            throw new IllegalArgumentException("Read length must be between 0 and " + MAX_READ_BYTES + " bytes.");
+        }
+        Map<String, Object> request = fields("command", "filesystem.remote.read",
+                "memberId", requireText(memberId, "Member ID"),
+                "rootId", requireText(rootId, "Eligible root ID"),
+                "path", relativePath == null ? "" : relativePath,
+                "offset", offset, "length", length);
+        try (SocketChannel channel = connect()) {
+            InputStream input = Channels.newInputStream(channel);
+            OutputStream output = Channels.newOutputStream(channel);
+            writeRequest(output, request);
+            Map<String, Object> header = readResponse(input);
+            long fileSize = number(header, "size");
+            long responseOffset = number(header, "offset");
+            long responseLength = number(header, "length");
+            long expectedLength = offset >= fileSize ? 0 : Math.min((long) length, fileSize - offset);
+            if (fileSize < 0 || responseOffset != offset || responseLength != expectedLength
+                    || responseLength < 0 || responseLength > MAX_READ_BYTES) {
+                throw new IOException("The control server returned an invalid remote filesystem range header.");
+            }
+            byte[] bytes = input.readNBytes(Math.toIntExact(responseLength));
+            if (bytes.length != responseLength) {
+                throw new IOException("The control connection ended before the remote filesystem range was received.");
+            }
+            return bytes;
+        }
+    }
+
+    /** Downloads a remote eligible-storage file atomically into a new local destination. */
+    public Map<String, Object> downloadRemoteFilesystemFile(String memberId, String rootId, String relativePath,
+                                                             Path destination) throws IOException {
+        return request("filesystem.remote.download", fields(
+                "memberId", requireText(memberId, "Member ID"),
+                "rootId", requireText(rootId, "Eligible root ID"),
+                "path", relativePath == null ? "" : relativePath,
+                "destination", requireText(destination.toAbsolutePath().normalize().toString(), "Destination")));
+    }
+
+    /** Uploads a completed local staging file; the remote owner performs final authorization. */
+    public Map<String, Object> uploadRemoteFilesystemFile(String memberId, String rootId, String relativePath,
+                                                           Path source, boolean overwrite, String approvalId)
+            throws IOException {
+        return request("filesystem.remote.write", fields(
+                "memberId", requireText(memberId, "Member ID"),
+                "rootId", requireText(rootId, "Eligible root ID"),
+                "path", relativePath == null ? "" : relativePath,
+                "source", requireText(source.toAbsolutePath().normalize().toString(), "Staging source"),
+                "overwrite", overwrite,
+                "approvalId", approvalId == null ? "" : approvalId));
+    }
+
+    public Map<String, Object> createRemoteFilesystemDirectory(String memberId, String rootId, String relativePath)
+            throws IOException {
+        return request("filesystem.remote.mkdir", fields(
+                "memberId", requireText(memberId, "Member ID"),
+                "rootId", requireText(rootId, "Eligible root ID"),
+                "path", requireText(relativePath, "Directory path")));
+    }
+
+    public Map<String, Object> moveRemoteFilesystemEntry(String memberId, String rootId, String from, String to,
+                                                          boolean overwrite, String approvalId,
+                                                          String destinationApprovalId) throws IOException {
+        return request("filesystem.remote.move", fields(
+                "memberId", requireText(memberId, "Member ID"),
+                "rootId", requireText(rootId, "Eligible root ID"),
+                "from", requireText(from, "Source path"),
+                "to", requireText(to, "Destination path"),
+                "overwrite", overwrite,
+                "approvalId", approvalId == null ? "" : approvalId,
+                "destinationApprovalId", destinationApprovalId == null ? "" : destinationApprovalId));
+    }
+
+    public Map<String, Object> deleteRemoteFilesystemEntry(String memberId, String rootId, String relativePath,
+                                                            boolean recursive, String approvalId) throws IOException {
+        return request("filesystem.remote.delete", fields(
+                "memberId", requireText(memberId, "Member ID"),
+                "rootId", requireText(rootId, "Eligible root ID"),
+                "path", relativePath == null ? "" : relativePath,
+                "recursive", recursive,
+                "approvalId", approvalId == null ? "" : approvalId));
+    }
+
     /** Downloads atomically to a new destination and verifies the source size/mtime did not change. */
     public DownloadResult download(String referenceId, String relativePath, Path destination) throws Exception {
         Path requested = destination.toAbsolutePath().normalize();
@@ -574,6 +686,17 @@ public final class LocalControlClient {
         } finally {
             if (!committed) Files.deleteIfExists(temporary);
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> rows(Object value, String label) throws IOException {
+        if (!(value instanceof List<?> list)) throw new IOException("The control server returned an invalid " + label + ".");
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> map)) throw new IOException("The control server returned an invalid " + label + " entry.");
+            result.add((Map<String, Object>) map);
+        }
+        return List.copyOf(result);
     }
 
     private Map<String, Object> request(String command) throws IOException { return request(command, Map.of()); }

@@ -217,6 +217,81 @@ public final class PeerConnector {
         } finally { connection.disconnect(); }
     }
 
+    /**
+     * Direct write-back to an owner's eligible filesystem. The source is hashed in a
+     * first streaming pass and re-hashed while uploading so a mutated source can never
+     * be published under a stale digest.
+     */
+    static Map<String,Object> putSignedFilesystemFile(String base, String rootId, String relativePath, Path source,
+                                                      boolean overwrite, String approvalId,
+                                                      NetworkMembershipClient membership, String caPath,
+                                                      long maximumBytes) throws Exception {
+        if (source == null || membership == null) throw new IllegalArgumentException("Filesystem upload source and membership are required.");
+        Path file = source.toAbsolutePath().normalize();
+        if (Files.isSymbolicLink(file) || !Files.isRegularFile(file, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            throw new IllegalArgumentException("Filesystem upload source must be a regular non-symlink file.");
+        }
+        long size = Files.size(file);
+        if (size < 0 || size > maximumBytes) throw new IllegalArgumentException("Filesystem upload exceeds the configured file limit.");
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        try (InputStream input = Files.newInputStream(file, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            byte[] buffer = new byte[128 * 1024]; int read;
+            while ((read = input.read(buffer)) != -1) digest.update(buffer, 0, read);
+        }
+        String sha256 = hex(digest.digest());
+        String normalizedPath = relativePath == null ? "" : relativePath;
+        String rawPath = "/network/fs/" + encodePath(rootId) + "/content?path=" + encodePath(normalizedPath)
+                + "&overwrite=" + overwrite;
+        Map<String,Object> metadata = new java.util.LinkedHashMap<>();
+        metadata.put("path", normalizedPath);
+        metadata.put("size", size);
+        metadata.put("sha256", sha256);
+        metadata.put("overwrite", overwrite);
+        metadata.put("approvalId", approvalId == null ? "" : approvalId);
+        byte[] signedMetadata = Json.stringify(metadata).getBytes(StandardCharsets.UTF_8);
+        HttpURLConnection connection = open(normalize(base) + rawPath, caPath);
+        try {
+            connection.setRequestMethod("PUT");
+            connection.setDoOutput(true);
+            connection.setConnectTimeout(8000);
+            connection.setReadTimeout(30 * 60 * 1000);
+            connection.setFixedLengthStreamingMode(size);
+            connection.setRequestProperty("Content-Type", "application/octet-stream");
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("X-PC-File-Length", Long.toString(size));
+            connection.setRequestProperty("X-PC-File-SHA256", sha256);
+            if (approvalId != null && !approvalId.isBlank()) connection.setRequestProperty("X-PC-Approval-ID", approvalId);
+            for (Map.Entry<String,String> header : membership.createAuthHeaders("PUT", rawPath, signedMetadata).entrySet()) {
+                connection.setRequestProperty(header.getKey(), header.getValue());
+            }
+            MessageDigest uploadedDigest = MessageDigest.getInstance("SHA-256");
+            try (InputStream input = Files.newInputStream(file, java.nio.file.LinkOption.NOFOLLOW_LINKS);
+                 OutputStream output = new BufferedOutputStream(connection.getOutputStream())) {
+                byte[] buffer = new byte[128 * 1024]; int read; long sent = 0;
+                while ((read = input.read(buffer)) != -1) {
+                    sent = Math.addExact(sent, read);
+                    if (sent > size) throw new IllegalStateException("Filesystem source changed size during transfer.");
+                    uploadedDigest.update(buffer, 0, read);
+                    output.write(buffer, 0, read);
+                }
+                String uploadedHash = hex(uploadedDigest.digest());
+                if (sent != size || !MessageDigest.isEqual(sha256.getBytes(StandardCharsets.US_ASCII),
+                        uploadedHash.getBytes(StandardCharsets.US_ASCII))) {
+                    throw new SecurityException("Filesystem source changed between digest verification and transfer.");
+                }
+            }
+            int status = connection.getResponseCode();
+            Map<String,Object> response = readJson(connection);
+            if (status != 201) throw new IllegalStateException("Filesystem write failed with HTTP " + status + ": " + String.valueOf(response.get("error")));
+            if (!sha256.equals(String.valueOf(response.get("sha256")))) throw new SecurityException("Owner did not confirm the uploaded filesystem digest.");
+            return response;
+        } finally { connection.disconnect(); }
+    }
+
+    private static String encodePath(String value) {
+        return encode(value == null ? "" : value).replace("+", "%20");
+    }
+
     /** Chunked direct managed placement with a receiver-persisted session and restart-safe resume state. */
     static Map<String,Object> putSignedResumableManagedFile(String base, String destinationRelativePath,
                                                             InputStreamSource source, long declaredSize,

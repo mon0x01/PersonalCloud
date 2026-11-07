@@ -12,7 +12,7 @@ public final class FuseMountMain {
 
     public static void main(String[] args) throws Exception {
         if (args.length > 1 || (args.length == 1 && ("--help".equals(args[0]) || "-h".equals(args[0])))) {
-            System.out.println("Usage: personalcloud-mount [empty-mountpoint]\nMounts the read-only /Devices virtual namespace.");
+            System.out.println("Usage: personalcloud-mount [empty-mountpoint]\nMounts the /Devices virtual namespace; remote eligible storage is writable.");
             return;
         }
         Path mountPoint = (args.length == 1 ? Path.of(args[0]) : Path.of(System.getProperty("user.home"), "PersonalCloud"))
@@ -30,14 +30,14 @@ public final class FuseMountMain {
         LocalControlClient client = new LocalControlClient(socket);
         client.ping();
         ReferenceFileSystemModel model = new ReferenceFileSystemModel(client);
-        PersonalCloudFuse filesystem = new PersonalCloudFuse(model);
+        PersonalCloudFuse filesystem = new PersonalCloudFuse(model, client);
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             try { filesystem.umount(); } catch (RuntimeException ignored) { }
         }, "personalcloud-fuse-unmount"));
-        System.out.println("PersonalCloud read-only filesystem mounted at " + mountPoint);
-        System.out.println("Namespace: /Devices/<device>/References and /Devices/<device>/Distributed-Storage");
+        System.out.println("PersonalCloud filesystem mounted at " + mountPoint);
+        System.out.println("Namespace: /Devices/<device>/References, /Devices/<device>/Distributed-Storage and writable /Devices/<device>/Filesystem");
         System.out.println("Press Ctrl+C to unmount.");
         filesystem.mount(mountPoint, true, false,
-                new String[]{"-o", "ro,default_permissions,nodev,nosuid,noexec"});
+                new String[]{"-o", "default_permissions,nodev,nosuid,noexec"});
     }
 }

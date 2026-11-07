@@ -549,6 +549,81 @@ public final class LocalControlServer implements AutoCloseable {
                             "filesystem", filesystem.grantConsent()));
                     case "filesystem.revoke-consent" -> respond(output, responseStarted, Map.of("ok", true,
                             "filesystem", filesystem.revokeConsent()));
+                    case "filesystem.remote.roots" -> {
+                        String memberId = string(request, "memberId");
+                        Map<String, Object> response = new NetworkPeerClient().listFilesystemRoots(
+                                requireMemberEndpoint(memberId), membership);
+                        respond(output, responseStarted, Map.of("ok", true, "memberId", memberId,
+                                "roots", response.getOrDefault("roots", List.of())));
+                    }
+                    case "filesystem.remote.browse" -> {
+                        String memberId = string(request, "memberId");
+                        Map<String, Object> response = new NetworkPeerClient().browseFilesystem(
+                                requireMemberEndpoint(memberId), string(request, "rootId"),
+                                optionalString(request, "path", ""), membership);
+                        respond(output, responseStarted, Map.of("ok", true,
+                                "entries", response.getOrDefault("entries", List.of())));
+                    }
+                    case "filesystem.remote.stat" -> {
+                        String memberId = string(request, "memberId");
+                        Map<String, Object> response = new NetworkPeerClient().statFilesystem(
+                                requireMemberEndpoint(memberId), string(request, "rootId"),
+                                optionalString(request, "path", ""), membership);
+                        Map<String, Object> result = new LinkedHashMap<>(response);
+                        result.put("ok", true);
+                        respond(output, responseStarted, result);
+                    }
+                    case "filesystem.remote.read" -> streamRemoteFilesystemRead(request, output, responseStarted);
+                    case "filesystem.remote.download" -> {
+                        String memberId = string(request, "memberId");
+                        NetworkPeerClient.RemoteDownloadResult result = new NetworkPeerClient().downloadFilesystemFile(
+                                requireMemberEndpoint(memberId), string(request, "rootId"),
+                                optionalString(request, "path", ""), stagingDestination(request),
+                                membership, config.maxFileBytes());
+                        respond(output, responseStarted, Map.of("ok", true, "path", result.path().toString(),
+                                "size", result.sizeBytes(), "sha256", result.sha256()));
+                    }
+                    case "filesystem.remote.write" -> {
+                        String memberId = string(request, "memberId");
+                        Map<String, Object> response = new NetworkPeerClient().uploadFilesystemFile(
+                                requireMemberEndpoint(memberId), string(request, "rootId"),
+                                optionalString(request, "path", ""), stagingSource(request),
+                                booleanValue(request, "overwrite", false), optionalString(request, "approvalId", ""),
+                                membership, config.maxFileBytes());
+                        Map<String, Object> result = new LinkedHashMap<>(response);
+                        result.put("ok", true);
+                        respond(output, responseStarted, result);
+                    }
+                    case "filesystem.remote.mkdir" -> {
+                        String memberId = string(request, "memberId");
+                        Map<String, Object> response = new NetworkPeerClient().createFilesystemDirectory(
+                                requireMemberEndpoint(memberId), string(request, "rootId"),
+                                string(request, "path"), membership);
+                        Map<String, Object> result = new LinkedHashMap<>(response);
+                        result.put("ok", true);
+                        respond(output, responseStarted, result);
+                    }
+                    case "filesystem.remote.move" -> {
+                        String memberId = string(request, "memberId");
+                        Map<String, Object> response = new NetworkPeerClient().moveFilesystemEntry(
+                                requireMemberEndpoint(memberId), string(request, "rootId"),
+                                string(request, "from"), string(request, "to"),
+                                booleanValue(request, "overwrite", false), optionalString(request, "approvalId", ""),
+                                optionalString(request, "destinationApprovalId", ""), membership);
+                        Map<String, Object> result = new LinkedHashMap<>(response);
+                        result.put("ok", true);
+                        respond(output, responseStarted, result);
+                    }
+                    case "filesystem.remote.delete" -> {
+                        String memberId = string(request, "memberId");
+                        Map<String, Object> response = new NetworkPeerClient().deleteFilesystemEntry(
+                                requireMemberEndpoint(memberId), string(request, "rootId"),
+                                optionalString(request, "path", ""), booleanValue(request, "recursive", false),
+                                optionalString(request, "approvalId", ""), membership);
+                        Map<String, Object> result = new LinkedHashMap<>(response);
+                        result.put("ok", true);
+                        respond(output, responseStarted, result);
+                    }
                     default -> throw new IllegalArgumentException("Unsupported local control command.");
                 }
             } catch (Exception failure) {
@@ -673,6 +748,74 @@ public final class LocalControlServer implements AutoCloseable {
         writeJson(output, header);
         if (bytes.length > 0) output.write(bytes);
         output.flush();
+    }
+
+    private void streamRemoteFilesystemRead(Map<String, Object> request, OutputStream output,
+                                            boolean[] responseStarted) throws Exception {
+        String memberId = string(request, "memberId");
+        String rootId = string(request, "rootId");
+        String relativePath = optionalString(request, "path", "");
+        long offset = longValue(request, "offset", 0);
+        long requestedLength = longValue(request, "length", 128 * 1024);
+        if (offset < 0) throw new IllegalArgumentException("Read offset cannot be negative.");
+        if (requestedLength < 0 || requestedLength > MAX_READ_BYTES) {
+            throw new IllegalArgumentException("Read length must be between 0 and " + MAX_READ_BYTES + " bytes.");
+        }
+        NetworkPeerClient.RemoteRangeResult range = new NetworkPeerClient().readRemoteFilesystemRange(
+                requireMemberEndpoint(memberId), rootId, relativePath, offset, (int) requestedLength, membership);
+        byte[] bytes = range.bytes();
+        Map<String, Object> header = new LinkedHashMap<>();
+        header.put("ok", true);
+        header.put("size", range.totalSize());
+        header.put("offset", offset);
+        header.put("length", bytes.length);
+        header.put("storageKind", "FILESYSTEM");
+        if (range.sha256() != null && !range.sha256().isBlank()) header.put("sha256", range.sha256());
+        responseStarted[0] = true;
+        writeJson(output, header);
+        if (bytes.length > 0) output.write(bytes);
+        output.flush();
+    }
+
+    private static Path stagingSource(Map<String, Object> request) throws Exception {
+        return stagingPath(string(request, "source"), false);
+    }
+
+    private static Path stagingDestination(Map<String, Object> request) throws Exception {
+        return stagingPath(string(request, "destination"), true);
+    }
+
+    /**
+     * Native write-back staging must stay in the system temporary directory. This
+     * keeps the owner-only control socket from becoming a generic local-file upload
+     * oracle while still supporting atomic FUSE/DocumentsProvider staging.
+     */
+    private static Path stagingPath(String value, boolean mustNotExist) throws Exception {
+        Path requested = Path.of(value).toAbsolutePath().normalize();
+        Path parent = requested.getParent();
+        if (parent == null || requested.getFileName() == null) {
+            throw new IllegalArgumentException("A staging file inside a parent directory is required.");
+        }
+        Path realParent = parent.toRealPath();
+        Path temporary = Path.of(System.getProperty("java.io.tmpdir")).toRealPath();
+        if (!realParent.startsWith(temporary)) {
+            throw new SecurityException("Native staging paths must be inside the system temporary directory.");
+        }
+        Path target = realParent.resolve(requested.getFileName());
+        if (Files.isSymbolicLink(target)) throw new SecurityException("Native staging paths cannot be symbolic links.");
+        if (mustNotExist) {
+            if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) throw new IllegalArgumentException("Staging destination already exists.");
+        } else if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IllegalArgumentException("Staging source must be a regular file.");
+        }
+        return target;
+    }
+
+    private static boolean booleanValue(Map<String, Object> request, String key, boolean fallback) {
+        Object value = request.get(key);
+        if (value == null) return fallback;
+        if (!(value instanceof Boolean bool)) throw new IllegalArgumentException("Request field '" + key + "' must be boolean.");
+        return bool;
     }
 
     private static String normalizePermission(String supplied) {

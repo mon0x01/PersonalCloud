@@ -28,13 +28,16 @@ Development proceeds toward a coherent, direct-only private device network. Auto
 - Offline search metadata cache is explicitly marked stale/unavailable.
 - Automated two-node integration tests exercise both directions between desktop and Android peer-core.
 
-## M3 — Linux native integration — source implementation in progress
-- Java FUSE2 adapter source over the read-only virtual filesystem model.
-- Fail-closed write/delete/rename/metadata mutation callbacks.
+## M3 — Writable native integration — implemented and automatically tested
+- Linux FUSE2 adapter over the shared read-write virtual filesystem model.
+- Writable eligible storage at `/Devices/<device>/Filesystem/<root>/...`; reference and managed planes remain read-only.
+- Create/write/read/mkdir/rename/delete/truncate with staged write-back, flush/fsync/release publication and no-overwrite commits.
+- Writable Android DocumentsProvider create/write/rename/move/delete through signed owner-authorized calls.
+- Fail-closed `chmod`/`chown`/`mknod`/link/xattr/`fallocate`; `utimens` is a documented no-op.
 - Mount launcher with empty-mountpoint guard and restrictive mount options.
 - KDE Dolphin actions for zero-copy directory reference registration, whole-file placement, and exact-file reference grants without copying.
-- Automated shell/static tests for the boundary and service-menu installer.
-- Remaining: compile against real JNR-FUSE dependency, install native FUSE2 runtime, exercise a real mount and kernel callbacks, and add richer native controls/progress after UX feedback.
+- Automated shell/static tests for the FUSE boundary, plus two-node native-adapter and desktop–Android tests for round trips, concurrency, failed commits, traversal/symlink escapes, PRIVATE/PROTECTED and consent revocation.
+- Remaining: exercise a real kernel mount and physical Android device; validate platform lifecycle/SAF behavior and add richer native controls/progress after UX feedback.
 
 ## M4 — Android network and system integration — peer-core implemented; app integration partial
 - Android peer-core implements account/password-proof enrollment, explicit approval, signed membership, catalogue sync, heartbeat and revocation.

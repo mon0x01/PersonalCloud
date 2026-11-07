@@ -121,8 +121,8 @@ grep -Fq 'InputStreamSource' android-peer/peer-core/src/main/java/dev/personalcl
 grep -Fq 'Managed source changed between digest verification and transfer' android-peer/peer-core/src/main/java/dev/personalcloud/android/core/PeerConnector.java
 grep -Fq 'source.open()' android-peer/peer-core/src/main/java/dev/personalcloud/android/core/PeerConnector.java
 
-# SAF contract: network content is read-only, served through seekable proxy descriptors,
-# with signed network membership and explicit stale/offline handling.
+# SAF contract: existing references remain read-only; eligible storage is writable
+# through the same signed membership and owner-enforced policy.
 grep -Fq 'extends DocumentsProvider' "$PROVIDER"
 grep -Fq 'NetworkPeerConnector.readReferenceRange' "$PROVIDER"
 grep -Fq 'NetworkPeerConnector.readManagedRange' "$PROVIDER"
@@ -130,10 +130,30 @@ grep -Fq 'openProxyFileDescriptor(ParcelFileDescriptor.MODE_READ_ONLY' "$PROVIDE
 grep -Fq 'Offline · cached metadata · unavailable' "$PROVIDER"
 grep -Fq 'requireMembership()' "$PROVIDER"
 grep -Fq 'if (!"r".equals(mode))' "$PROVIDER"
-if grep -Eq 'FLAG_SUPPORTS_WRITE|insertDocument\(|renameDocument\(' "$PROVIDER"; then
-  echo 'FAIL: Android DocumentsProvider must remain read-only in this scope.' >&2
+grep -Fq 'FLAG_SUPPORTS_WRITE' "$PROVIDER"
+grep -Fq 'FLAG_DIR_SUPPORTS_CREATE' "$PROVIDER"
+grep -Fq 'public String createDocument(' "$PROVIDER"
+grep -Fq 'public String renameDocument(' "$PROVIDER"
+grep -Fq 'public String moveDocument(' "$PROVIDER"
+grep -Fq 'openFilesystemDocument' "$PROVIDER"
+grep -Fq 'FilesystemWriteCallback' "$PROVIDER"
+grep -Fq 'NetworkPeerConnector.browseFilesystem' "$PROVIDER"
+grep -Fq 'NetworkPeerConnector.listFilesystemRoots' "$PROVIDER"
+grep -Fq 'NetworkPeerConnector.uploadFilesystemFile' "$PROVIDER"
+grep -Fq 'NetworkPeerConnector.deleteFilesystemEntry' "$PROVIDER"
+grep -Fq 'NetworkPeerConnector.moveFilesystemEntry' "$PROVIDER"
+grep -Fq 'if (!parent.type.equals("fsroot") && !parent.type.equals("fsdir"))' "$PROVIDER"
+if grep -Fq 'must remain read-only in this scope' "$PROVIDER"; then
+  echo 'FAIL: Android DocumentsProvider still rejects writable eligible storage.' >&2
   exit 1
 fi
+
+grep -Fq 'putSignedFilesystemFile' android-peer/peer-core/src/main/java/dev/personalcloud/android/core/PeerConnector.java
+grep -Fq 'X-PC-Approval-ID' android-peer/peer-core/src/main/java/dev/personalcloud/android/core/PeerConnector.java
+grep -Fq 'Filesystem source changed between digest verification and transfer' android-peer/peer-core/src/main/java/dev/personalcloud/android/core/PeerConnector.java
+grep -Fq 'listFilesystemRoots' android-peer/peer-core/src/main/java/dev/personalcloud/android/core/NetworkPeerConnector.java
+grep -Fq 'uploadFilesystemFile' android-peer/peer-core/src/main/java/dev/personalcloud/android/core/NetworkPeerConnector.java
+grep -Fq 'deleteFilesystemEntry' android-peer/peer-core/src/main/java/dev/personalcloud/android/core/NetworkPeerConnector.java
 
 
 # In-place Android SAF references: folder selection persists provider permission and stores

@@ -30,7 +30,7 @@ bash -n integrations/linux/personalcloudctl integrations/linux/personalcloud-mou
   scripts/start-node.sh scripts/test-start-node-tls-routing.sh
 
 grep -Fq 'bash "$ROOT/scripts/android-desktop-interop-test.sh"' scripts/android-peer-test.sh
-grep -q 'ro,default_permissions,nodev,nosuid,noexec' integrations/linux/fuse/src/main/java/dev/personalcloud/linux/fuse/FuseMountMain.java
+grep -q 'default_permissions,nodev,nosuid,noexec' integrations/linux/fuse/src/main/java/dev/personalcloud/linux/fuse/FuseMountMain.java
 grep -q 'Mount point must be empty' integrations/linux/fuse/src/main/java/dev/personalcloud/linux/fuse/FuseMountMain.java
 # Maven must use a normal dependency resolved from a project-local repository;
 # the deprecated system scope makes the adapter non-reproducible downstream.
@@ -42,13 +42,32 @@ grep -Fq 'maven.repo.local="$MAVEN_REPO"' integrations/linux/build-fuse.sh
 grep -Fq 'maven-install-plugin:3.1.3:install-file' integrations/linux/build-fuse.sh
 grep -Fq 'ServicesResourceTransformer' integrations/linux/fuse/pom.xml
 grep -Fq 'META-INF/MANIFEST.MF' integrations/linux/fuse/pom.xml
-grep -Fq 'if ((mask & 1) != 0 && !attributes.directory()) return -ErrorCodes.EACCES();' integrations/linux/fuse/src/main/java/dev/personalcloud/linux/fuse/PersonalCloudFuse.java
-for operation in write write_buf create mknod mkdir unlink rmdir rename link symlink truncate ftruncate chmod chown utimens setxattr removexattr fallocate; do
-  grep -Eq "int ${operation}\\(.*return -ErrorCodes\\.EROFS\\(\\);" integrations/linux/fuse/src/main/java/dev/personalcloud/linux/fuse/PersonalCloudFuse.java || {
-    echo "FAIL: FUSE mutation callback '${operation}' is not explicitly read-only." >&2
-    exit 1
-  }
-done
+FUSE=integrations/linux/fuse/src/main/java/dev/personalcloud/linux/fuse/PersonalCloudFuse.java
+grep -Fq 'if ((mask & 1) != 0 && !attributes.directory()) return -ErrorCodes.EACCES();' "$FUSE"
+grep -Fq 'WritableVirtualFilesystem' "$FUSE"
+grep -Fq 'public int write(' "$FUSE"
+grep -Fq 'public int create(' "$FUSE"
+grep -Fq 'public int mkdir(' "$FUSE"
+grep -Fq 'public int unlink(' "$FUSE"
+grep -Fq 'public int rmdir(' "$FUSE"
+grep -Fq 'public int rename(' "$FUSE"
+grep -Fq 'public int truncate(' "$FUSE"
+grep -Fq 'public int ftruncate(' "$FUSE"
+grep -Fq 'public int flush(' "$FUSE"
+grep -Fq 'public int release(' "$FUSE"
+grep -Fq 'public int utimens(' "$FUSE"
+grep -Fq 'filesystem.upload(' "$FUSE"
+grep -Fq 'filesystem.download(' "$FUSE"
+grep -Fq 'filesystem.move(' "$FUSE"
+grep -Fq 'filesystem.delete(' "$FUSE"
+grep -Fq 'if (!filesystem.isWritable(path)) return -ErrorCodes.EROFS();' "$FUSE"
+if grep -Eq 'int (write|create|mkdir|unlink|rmdir|rename|truncate|ftruncate)\(.*return -ErrorCodes\.EROFS\(\);' "$FUSE"; then
+  echo "FAIL: FUSE writable callbacks must not be hard-coded read-only." >&2
+  exit 1
+fi
+# The reference planes must stay read-only while eligible storage is writable.
+grep -Fq 'return filesystem.isWritable(path) ? -ErrorCodes.EPERM() : -ErrorCodes.EROFS();' "$FUSE"
+grep -Fq 'return filesystem.isWritable(path) ? -ErrorCodes.EOPNOTSUPP() : -ErrorCodes.EROFS();' "$FUSE"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -100,4 +119,4 @@ grep -Fq "Exec=\"$ROOT/integrations/linux/personalcloud-dolphin-share-file\" %f"
 bash scripts/test-desktop-peer-tls-provisioning.sh
 bash scripts/test-start-node-tls-routing.sh
 
-echo "PASS: Linux integration shell syntax, read-only FUSE callbacks, safe Dolphin arguments, symlink rejection, desktop TLS provisioning, TLS identity/truststore routing and all service-menu installation."
+echo "PASS: Linux integration shell syntax, writable FUSE callbacks with read-only reference planes, safe Dolphin arguments, symlink rejection, desktop TLS provisioning, TLS identity/truststore routing and all service-menu installation."

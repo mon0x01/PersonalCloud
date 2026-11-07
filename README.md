@@ -29,12 +29,12 @@ This repository contains the scoped Java V2 desktop node, its local control CLI,
 - Remote reference grants, browsing, stat, search, bounded range reads with per-range SHA-256 verification, and full-download integrity checks.
 - Owner-side recovery snapshots before authorized deletion.
 - Manual whole-file placement into a selected remote node's managed-storage root, with staging, digest validation, no-overwrite commit and remote listing/download/delete.
-- Read-only OS-neutral filesystem projection at `Devices/<device>/References` and `Devices/<device>/Distributed-Storage`.
-- Linux JNR-FUSE2 adapter source with explicit read-only mutation rejection, plus KDE Dolphin actions for directory references, whole-file placement and exact-file reference grants without copies.
+- Read-only OS-neutral reference projection at `Devices/<device>/References` and `Devices/<device>/Distributed-Storage`, plus writable eligible storage at `Devices/<device>/Filesystem`.
+- Linux JNR-FUSE2 adapter with safe staged write-back, no-overwrite commits and explicit read-only reference planes, plus KDE Dolphin actions for directory references, whole-file placement and exact-file reference grants without copies.
 
 ## Current integration boundary
 
-The Linux Java filesystem model and read-only JNR-FUSE2 adapter are implemented; the adapter has compiled successfully on Arch Linux with Maven and FUSE2 development headers. A real kernel mount remains to be validated. KDE Dolphin actions register directories in place, place whole files on a selected member, and share an individual file by reference without copying it. Android peer-core implements signed network membership and remote storage operations. Android app source includes operational membership controls, a signed-network DocumentsProvider, and no-copy SAF references for selected folders and individual files. The Android framework module is assembled as a debug APK in CI; physical-device validation and the final UI redesign remain pending product-owner UX feedback.
+The Linux Java filesystem model and writable JNR-FUSE2 adapter are implemented; the adapter compiles on Arch Linux with Maven and FUSE2 development headers and passes a non-mounting launch smoke test. A real kernel mount remains to be validated. Eligible storage under `Devices/<device>/Filesystem` is writable through owner-authorized staging and no-overwrite commits; the reference and managed planes remain read-only. KDE Dolphin actions register directories in place, place whole files on a selected member, and share an individual file by reference without copying it. Android peer-core implements signed network membership and remote storage operations. Android app source includes operational membership controls, a signed-network DocumentsProvider with writable eligible-storage documents, and no-copy SAF references for selected folders and individual files. The Android framework module is assembled as a debug APK in CI; physical-device validation and the final UI redesign remain pending product-owner UX feedback.
 
 See:
 - [Product specification](docs/PRODUCT_SPEC.md) — canonical source of truth
