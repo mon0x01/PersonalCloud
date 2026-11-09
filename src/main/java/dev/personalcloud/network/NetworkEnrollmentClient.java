@@ -43,6 +43,17 @@ public final class NetworkEnrollmentClient {
     public Map<String, Object> join(String baseUrl, String accountName, char[] password,
                                     AppConfig config, DeviceIdentity identity,
                                     NetworkMembershipService membership) throws Exception {
+        return join(baseUrl, accountName, password, config, identity, membership, false);
+    }
+
+    /**
+     * Joins a network. Broad filesystem access is only enabled when the owner
+     * explicitly consents; the default is no access.
+     */
+    public Map<String, Object> join(String baseUrl, String accountName, char[] password,
+                                    AppConfig config, DeviceIdentity identity,
+                                    NetworkMembershipService membership,
+                                    boolean filesystemConsent) throws Exception {
         String base = RemotePeerClient.normalizeBaseUrl(baseUrl);
         Map<String, Object> challenge = getJson(base + "/network/challenge");
         String saltText = text(challenge, "salt");
@@ -83,7 +94,7 @@ public final class NetworkEnrollmentClient {
             if ("APPROVED".equals(status)) {
                 Map<String, Object> accepted = new LinkedHashMap<>(result);
                 accepted.put("salt", saltText);
-                return membership.acceptApproval(accepted, password);
+                return membership.acceptApproval(accepted, password, filesystemConsent);
             }
             if (!"PENDING".equals(status)) throw new IllegalStateException("The network returned an unknown enrollment status: " + status);
         }

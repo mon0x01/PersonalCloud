@@ -358,10 +358,17 @@ public final class PersonalCloudCli {
                 } finally { java.util.Arrays.fill(password, '\0'); }
             }
             case "join" -> {
-                requireCount(args, start, 1, 2, "network join <https-peer-url> [account-name]");
+                requireCount(args, start, 1, 3, "network join <https-peer-url> [account-name] [--consent]");
+                String account = "";
+                boolean consent = false;
+                for (int index = start + 1; index < args.length; index++) {
+                    if ("--consent".equals(args[index])) consent = true;
+                    else if (account.isEmpty()) account = args[index];
+                    else throw new IllegalArgumentException("Unknown network join option: " + args[index]);
+                }
                 char[] password = promptPassword("Network password: ");
                 try {
-                    print(asMap(client.networkJoin(args[start], args.length > start + 1 ? args[start + 1] : "", password).get("network")));
+                    print(asMap(client.networkJoin(args[start], account, password, consent).get("network")));
                 } finally { java.util.Arrays.fill(password, '\0'); }
             }
             case "requests" -> client.networkRequests().forEach(PersonalCloudCli::print);

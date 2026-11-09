@@ -112,8 +112,14 @@ public final class LocalControlClient {
     }
 
     public Map<String, Object> networkJoin(String baseUrl, String accountName, char[] password) throws IOException {
+        return networkJoin(baseUrl, accountName, password, false);
+    }
+
+    public Map<String, Object> networkJoin(String baseUrl, String accountName, char[] password,
+                                           boolean filesystemConsent) throws IOException {
         return request("network.join", fields("baseUrl", requireText(baseUrl, "Network peer URL"),
-                "accountName", accountName == null ? "" : accountName, "password", new String(password)));
+                "accountName", accountName == null ? "" : accountName, "password", new String(password),
+                "filesystemConsent", Boolean.toString(filesystemConsent)));
     }
 
     @SuppressWarnings("unchecked")

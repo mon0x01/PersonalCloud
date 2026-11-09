@@ -8,10 +8,12 @@ PersonalCloud is designed for a private set of personally operated devices. It m
 
 - Non-loopback peer endpoints require HTTPS with a configured PKCS#12 server identity. Clients validate the peer certificate chain and hostname/IP subject alternative name.
 - Network enrollment uses a short-lived challenge and a PBKDF2-HMAC-SHA-256-derived verifier (310,000 iterations). The account password is not sent to the approving peer.
-- An existing active network member must explicitly approve or reject a joining device.
-- Desktop and Android peer-core nodes generate independent Ed25519 signing identities. Chained membership certificates bind each public key to a node and network.
+- An existing active network member must explicitly approve or reject a joining device. The founder admits the first additional device; once at least two members are active, any active member may admit independently. Inactive or revoked local members cannot issue approvals.
+- Each admission produces a short-lived Ed25519-signed `AdmissionApproval` bound to the network, request UUID, candidate identity/endpoint, approver node ID and exact approver certificate SHA-256. Joining devices reject forged, altered, expired and replayed approvals.
+- Desktop and Android peer-core nodes generate independent Ed25519 signing identities. Chained membership certificates bind each public key to a node and network. Chain validation rejects future-issued certificates, non-root self-issue, children predating their issuer, duplicate identities and chains outside the expected root.
 - Signed member requests bind the HTTP method, raw path, timestamp, nonce and body digest. Receivers reject invalid signatures, stale timestamps and replayed nonces. Timestamp bounds are compared directly rather than using overflow-prone absolute subtraction; regression tests cover extreme signed integer timestamps on desktop and Android peer core.
-- Member catalogues carry signed membership certificates and revocation status. Local revocation is enforced by authenticated peer operations after the updated catalogue is received.
+- Member catalogues carry signed membership certificates and signed `MembershipRevocation` records. Revocation is monotonic: stale catalogues cannot reactivate a revoked identity, and certificate chains that pass through a revoked member are rejected. Local revocation is enforced by authenticated peer operations after the updated catalogue is received.
+- Broad filesystem consent is explicit. New devices default to no broad access and record owner consent during enrollment; existing devices must opt in during upgrade. Consent state is visible in membership status and revocation disables access immediately.
 - The transitional pairing protocol uses high-entropy one-time invitations and token hashes; it remains for compatibility and is distinct from the approval-gated network membership model.
 - The desktop local-control socket is Unix-domain and owner-only (`0600`) inside a private data directory. It is not exposed on the network listener.
 - Properties-backed state mutations roll back their in-memory changes if the atomic persistence operation fails, preventing a running node from acting on state that was not committed to disk. This does not yet provide cross-process transactional locking or full directory-fsync crash durability.
@@ -43,7 +45,7 @@ The desktop `data/` directory contains node identity, membership private keys/ce
 - The Java JNR-FUSE2 adapter compiled against its Maven dependency on Arch Linux on 2026-11-04. The adapter has not yet been mounted through the Linux kernel; read-only callback behavior is covered by source-level integration checks, not live kernel testing.
 - No independent security audit has been performed. Local filesystem race resistance remains an ongoing hardening task. Receiver transfer sessions survive restart, but physical device power-loss behavior and the Android UI's transfer-ID persistence require real-device acceptance testing.
 - Direct connectivity can fail behind CGNAT or restrictive firewalls. There is deliberately no relay fallback.
-- Revocation prevents future authorized protocol operations after peers learn the updated membership catalogue; it cannot retract bytes already downloaded by a peer.
+- Revocation prevents future authorized protocol operations after peers learn the updated membership catalogue; it cannot retract bytes already downloaded by a peer. A revoked member holding stale local state can still sign requests or approvals, but peers that know the revocation reject them and refuse chains passing through the revoked identity.
 - Application-level end-to-end file encryption and key-recovery workflows are not part of the current scope.
 
 ## State-store cross-process consistency hardening — 2026-11-05

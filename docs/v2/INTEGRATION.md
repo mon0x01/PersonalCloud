@@ -38,12 +38,22 @@ The local control socket is `<PERSONALCLOUD_DATA_DIR>/control.sock`, owner-only.
 
 Preserve `data/` across source upgrades. It contains `node-id.txt`, `state.properties`, `state.properties.bak`, `vault.key`, activity logs and version snapshots. Do not copy TLS private keys into the repository. The default managed storage root is outside the repository and must not be deleted as part of a source-code upgrade.
 
+## Membership upgrade notes
+
+- Existing network members keep their signed membership certificate and device identity; the upgrade does not rotate the network root.
+- Broad filesystem consent is never granted silently. A new device starts with access disabled and must pass the explicit consent flag during enrollment (`network join <url> [account] --consent`, or the Android enrollment option).
+- An existing device upgraded to this release must run `filesystem consent` (or the Android equivalent) before broad eligible-storage access is exposed. `network status` reports `filesystemConsentRequired` until then.
+- Approvals are now signed `AdmissionApproval` records. Legacy approval results without the record remain accepted for compatibility, but new peers verify the signed record and reject replayed or expired approvals.
+- Revocation now includes a signed `MembershipRevocation` record. Legacy unsigned `REVOKED` catalogue status remains accepted, but new peers validate signed records when present and keep revocation monotonic.
+- Legacy `/node/*` token routes remain available for the compatibility period.
+
 ## Tests
 
 ```bash
 ./scripts/test-v2-foundation.sh
+./scripts/android-desktop-interop-test.sh
 ./scripts/android-peer-test.sh
 ./scripts/test-all.sh
 ```
 
-All application, CLI, filesystem-model and test code in this scoped release is Java. Shell scripts only orchestrate compilation, certificate generation and test execution.
+`DelegatedAdmissionIntegrationTest` covers delegated admission thresholds, approval attribution and rejection cases, certificate-chain hardening, revocation propagation and consent. `DesktopInteropTest` covers desktop↔Android approval, revocation and consent interoperability.

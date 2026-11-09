@@ -22,7 +22,7 @@ These routes preserve compatibility with the earlier Android invitation/token pe
 - `POST /network/enroll` — submit the candidate device identity, password proof and device signature.
 - `GET /network/enroll/status/{requestId}` — poll a request for approval/rejection and retrieve the signed membership bundle after approval.
 
-The network account password is converted to a PBKDF2-HMAC-SHA-256 verifier and used to produce a challenge-bound HMAC proof. The password itself is not sent to the remote member. An existing active member explicitly approves or rejects the new device. Each device generates its own Ed25519 key pair and receives a chained membership certificate.
+The network account password is converted to a PBKDF2-HMAC-SHA-256 verifier and used to produce a challenge-bound HMAC proof. The password itself is not sent to the remote member. An existing active member explicitly approves or rejects the new device. The founder admits the first additional device; once two members are active, any active member may admit independently. Approval returns a short-lived signed `AdmissionApproval` bound to the request, candidate identity/endpoint, approver node ID and exact approver certificate SHA-256. Each device generates its own Ed25519 key pair and receives a chained membership certificate.
 
 ### Signed active-member routes
 
@@ -48,7 +48,7 @@ After enrollment, each request is signed by the device's Ed25519 key. The signat
 - `GET /network/managed/files/{fileId}/content?offset=...&length=...`
 - `DELETE /network/managed/files/{fileId}`
 
-Member requests are checked against the local network identity, the signed certificate chain, active/revoked status, timestamp freshness, nonce replay state and request signature before dispatch.
+Member requests are checked against the local network identity, the signed certificate chain (including root, issuer ordering, duplicate identities and revoked links), active/revoked status, timestamp freshness, nonce replay state and request signature before dispatch. Revocation records are signed and monotonic; stale catalogues cannot reactivate a revoked member.
 
 Catalogue synchronization is bounded-concurrent (at most four peers at a time). Android does not hold its membership-state monitor during outbound peer requests, so one unreachable peer cannot block inbound member authentication or local membership controls. A member's online flag is a 90-second direct-heartbeat lease; persisted flags expire after downtime and stale catalogue snapshots do not overwrite a newer local heartbeat. This is a liveness indicator, not a guarantee that the next file transfer will succeed.
 
@@ -118,7 +118,7 @@ Environment variables:
 - The destination enforces size/path limits and commits without overwriting an existing destination.
 - Downloads stage to a temporary file and verify expected size and SHA-256 before finalization.
 - `DOWNLOAD` permits read/browse operations; `DOWNLOAD+DELETE` additionally permits deletion of the referenced original. The owner creates a recovery snapshot before supported deletion.
-- Revocation blocks future signed protocol operations once updated membership state is received; it cannot erase bytes already downloaded by another member.
+- Revocation blocks future signed protocol operations once updated membership state is received; it cannot erase bytes already downloaded by another member. Signed revocation records are monotonic and chains passing through a revoked member are refused.
 
 ### Durable outbound placement jobs
 

@@ -61,15 +61,19 @@ The device submits an enrollment request and remains pending until approved.
 - Initially, the first device approves joining devices.
 - When at least **two devices are active**, **any eligible active member** may independently approve another device.
 - Majority approval is **not** required for ordinary admission.
+- Each approval is a short-lived Ed25519-signed `AdmissionApproval` record bound to the network, enrollment request, candidate node ID/name/public key/endpoint, approver node ID, and the exact SHA-256 of the approver's membership certificate.
+- The joining device verifies the approval signature, binding, lifetime and one-time use in addition to the chained certificate.
 - All peers independently verify membership and signed approvals.
 - The existing certificate chain is preserved wherever possible.
 - Root succession/rotation is **deferred**. The existing root remains the trust anchor. No unapproved succession protocol is implemented.
 
 ### 2.4 Verification and revocation
 
-- Every peer verifies membership certificates independently: chain to the network root, issuer validity, signature validity, revocation status, and replay protection.
+- Every peer verifies membership certificates independently: chain to the network root, issuer validity, signature validity, issue ordering, revocation status, and replay protection.
+- Revocation is an Ed25519-signed `MembershipRevocation` record attributable to an active member. Unsigned legacy `REVOKED` catalogue status remains accepted for compatibility.
+- Revocation is monotonic: a stale catalogue can never reactivate a revoked identity, and a certificate chain that passes through a revoked member is rejected.
 - Revocation must be authenticated, propagated, and enforceable by every peer.
-- A revoked member cannot perform authorized protocol operations once the revocation is known.
+- A revoked member cannot approve new devices or perform authorized protocol operations once the revocation is known.
 - Revocation cannot retract bytes already downloaded by a peer.
 
 ### 2.5 Compatibility
@@ -83,7 +87,13 @@ The device submits an enrollment request and remains pending until approved.
 
 ### 3.1 Default access
 
-When a device joins the network and consents, it receives broad filesystem access to other active members' eligible user-data storage by default. The user must not need to upload files into PersonalCloud before another device can access them.
+When a device joins the network and explicitly consents, it receives broad filesystem access to other active members' eligible user-data storage by default. The user must not need to upload files into PersonalCloud before another device can access them.
+
+Consent is explicit and is never granted silently:
+
+- A new device starts with broad filesystem access disabled and records the owner's consent during enrollment (`network join ... --consent`, Android enrollment option) or later through `filesystem consent`.
+- An existing device upgraded to a build with broad-access consent must opt in explicitly; it never inherits access silently.
+- Revoking consent disables broad access immediately and is reflected in membership status as consent required.
 
 Default permissions for eligible storage:
 
@@ -326,11 +336,12 @@ This section records the status at the latest completed milestone and is updated
 - Eligible-root filesystem access (M2): owner consent, OS-user ownership boundaries, system/credential/PersonalCloud-state exclusions, signed `/network/fs/*` browse/stat/bounded-range/download/create/write/move/delete routes, source-side PRIVATE hiding and PROTECTED approval enforcement, atomic SHA-256-verified writes, no-overwrite publication, and separate source/destination approvals for protected moves.
 - Writable native integration (M3): Linux FUSE create/write/read/mkdir/rename/delete/truncate with safe staging and flush/release publication; Android DocumentsProvider create/write/rename/move/delete through signed owner-authorized calls; native-adapter tests for round trips, no-overwrite conflicts, concurrent writers, failed/rejected commits, traversal and symlink escapes, PRIVATE/PROTECTED enforcement and consent revocation.
 - Three-peer coordinated transfers (M2.1): a coordinator Z issues a short-lived Ed25519-signed ticket binding source, destination, roots/paths, operation, version, size, digest, expiry, request/transfer identity and optional approvals. X and Y verify independently and durably claim the ticket per role. X streams resumable chunks directly to Y; Z exchanges metadata and status only and never receives bytes. COPY and safe MOVE are implemented with destination commit and source revalidation before deletion, a durable `DELETING` state, honest `COPIED_NOT_MOVED` partial outcomes, idempotent retries and revoked-member rejection. Desktop local control/CLI exposes `coordinated plan/prepare/transfer/status/retry/list`; three-node automated tests cover direct X→Y isolation, invalid/expired/replayed tickets, wrong identities/paths/digests, source mutation, destination failure, interruption recovery, protected approvals and revocation.
+- Delegated admission hardening (M5): signed short-lived `AdmissionApproval` records attributable to the exact approving active member and certificate, post-threshold independent approval by any active member, hardened certificate-chain validation (future issue, parent ordering, duplicate identity, expected root), signed monotonic `MembershipRevocation` records with stale-catalogue conflict rejection, refusal of requests and admissions by revoked members, and explicit broad-filesystem consent during new-device enrollment and existing-device upgrade. Desktop and Android peer cores produce and verify the same records; desktop→Android and Android→desktop admission and revocation are covered by interoperability tests.
 
 ### 9.2 Target functionality not yet implemented
 
-- Delegated admission capability (`ADMIT`) and signed revocation records with epochs.
 - Per-member TLS endpoint pinning, enrollment rate limiting, JSON depth limits, per-uploader transfer quotas.
+- Root succession/rotation, which remains explicitly deferred.
 - Complete `docs/` documentation structure and ADRs beyond M0.
 
 ### 9.3 Known limitations
@@ -338,7 +349,8 @@ This section records the status at the latest completed milestone and is updated
 - No independent security audit.
 - Protection approvals are process-local; a restart fails closed and requires fresh approvals.
 - Remote filesystem operations are not yet audited, quota-limited, or rate-limited.
-- Broad-access consent is currently an owner-local CLI action; it is not yet part of the enrollment or upgrade user experience.
+- Broad-access consent is explicit in enrollment and upgrade flows; Android UI copy and migration messaging for the consent prompt remain minimal.
+- Root succession/rotation is not implemented; a compromised or lost root identity requires a new network identity.
 - The OS-user ownership boundary checks the eligible root itself and rejects shared home parents such as `/home` and `/Users`. It does not enumerate every user home beneath an arbitrary owner-controlled volume.
 - Remote range reads recompute the full-file digest on each request.
 - Directory moves and recursive deletes refuse trees containing PRIVATE/PROTECTED rules or excluded credential paths; per-descendant approval is not yet available.

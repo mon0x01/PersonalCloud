@@ -33,9 +33,9 @@ The process entry point builds and owns a node's runtime dependency graph, loads
 
 ### `NetworkMembershipService` and `DeviceIdentity`
 
-Each node creates an Ed25519 signing key pair. A network bootstrap stores a PBKDF2-HMAC-SHA-256 verifier, a root membership certificate and the local member record. Enrollment uses a short-lived challenge and a password proof; the password itself is not sent to the approving device. An active member explicitly approves or rejects the pending device. A signed certificate chain links member identities to the network root.
+Each node creates an Ed25519 signing key pair. A network bootstrap stores a PBKDF2-HMAC-SHA-256 verifier, a root membership certificate and the local member record. Enrollment uses a short-lived challenge and a password proof; the password itself is not sent to the approving device. An active member explicitly approves or rejects the pending device, returning a short-lived signed admission approval attributable to that member. A signed certificate chain links member identities to the network root.
 
-Authenticated peer requests sign the HTTP method, raw path, timestamp, nonce and body digest. Receivers validate the member certificate chain, network identity, timestamp, signature and replay nonce before dispatching the request. Revoked identities are rejected.
+Authenticated peer requests sign the HTTP method, raw path, timestamp, nonce and body digest. Receivers validate the member certificate chain, network identity, issue ordering, duplicate identities, timestamp, signature and replay nonce before dispatching the request. Revoked identities and chains passing through revoked members are rejected. Revocation records are signed and monotonic, so stale catalogues cannot restore access. Broad filesystem consent is explicit for new enrollment and existing-device upgrade.
 
 ### `DeviceCatalogueService` and `NetworkPeerClient`
 

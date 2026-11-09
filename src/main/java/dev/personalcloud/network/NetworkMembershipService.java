@@ -63,7 +63,44 @@ public final class NetworkMembershipService {
                 .filter(row -> "ACTIVE".equals(row.getOrDefault("status", "ACTIVE"))).count());
         result.put("pendingRequests", network == null ? 0 : store.records("enrollment").stream()
                 .filter(row -> "PENDING".equals(row.get("status"))).count());
+        boolean consent = network != null && Boolean.parseBoolean(network.getOrDefault("filesystemConsent", "false"));
+        result.put("filesystemConsent", consent);
+        result.put("filesystemConsentRequired", network != null && !consent);
+        result.put("canApproveAdmissions", canApproveAdmissions());
         return result;
+    }
+
+    /** True only when this device is an active member authorized to admit new devices. */
+    public synchronized boolean canApproveAdmissions() {
+        Map<String, String> network = network();
+        if (network == null) return false;
+        Map<String, String> local = store.getRecord("member", config.nodeId());
+        if (local == null || !"ACTIVE".equals(local.getOrDefault("status", "ACTIVE"))) return false;
+        try {
+            MembershipCertificate.CertificateInfo own = MembershipCertificate.verify(network.get("localCertificate"));
+            if (!own.nodeId().equals(config.nodeId())
+                    || !own.publicKeyEncoded().equals(identity.publicKeyBase64())) {
+                return false;
+            }
+        } catch (Exception invalid) {
+            return false;
+        }
+        long active = store.records("member").stream()
+                .filter(row -> "ACTIVE".equals(row.getOrDefault("status", "ACTIVE"))).count();
+        if (active < 1) return false;
+        // The root admits the first joiner. Once a second device is active, any
+        // active member is an independent admission authority.
+        if (config.nodeId().equals(network.get("rootNodeId"))) return true;
+        return active >= 2;
+    }
+
+    /** Records explicit owner consent for broad eligible-filesystem access. */
+    public synchronized Map<String, Object> recordFilesystemConsent(boolean granted) throws Exception {
+        Map<String, String> network = requireNetwork();
+        network.put("filesystemConsent", Boolean.toString(granted));
+        network.put("filesystemConsentAt", Instant.now().toString());
+        store.putRecord("network", "active", network);
+        return Map.of("filesystemConsent", granted, "filesystemConsentRequired", !granted);
     }
 
     public synchronized Map<String, Object> bootstrap(String networkName, String accountName, char[] password) throws Exception {
@@ -194,13 +231,22 @@ public final class NetworkMembershipService {
     public synchronized Map<String, Object> approve(String requestId) throws Exception {
         Map<String, String> request = requirePending(requestId);
         Map<String, String> network = requireNetwork();
+        if (!canApproveAdmissions()) {
+            throw new SecurityException("This device is not an authorized active admission authority.");
+        }
         String certificate = MembershipCertificate.issue(network.get("networkId"), request.get("nodeId"),
                 request.get("nodeName"), request.get("endpoint"), request.get("publicKey"),
                 network.get("localCertificate"), identity.privateKey());
         MembershipCertificate.CertificateInfo info = MembershipCertificate.verify(certificate);
+        Map<String, Object> approval = AdmissionApproval.create(network.get("networkId"), requestId,
+                request.get("nodeId"), request.get("nodeName"), request.get("publicKey"),
+                request.get("endpoint"), config.nodeId(),
+                AdmissionApproval.certificateSha256(network.get("localCertificate")),
+                identity.privateKey(), AdmissionApproval.DEFAULT_TTL_SECONDS);
         saveMember(info, "ACTIVE", Instant.now().toString(), 0L);
         request.put("status", "APPROVED");
         request.put("certificate", certificate);
+        request.put("admissionApproval", Json.stringify(approval));
         request.put("approvedAt", Instant.now().toString());
         store.putRecord("enrollment", requestId, request);
         return enrollmentResult(requestId);
@@ -228,6 +274,9 @@ public final class NetworkMembershipService {
             result.put("accountName", network.get("accountName"));
             result.put("salt", network.get("salt"));
             result.put("certificate", row.get("certificate"));
+            if (row.get("admissionApproval") != null) {
+                result.put("admissionApproval", row.get("admissionApproval"));
+            }
             result.put("members", membersForWire());
         } else if ("REJECTED".equals(row.get("status"))) {
             result.put("reason", row.getOrDefault("reason", "Rejected."));
@@ -236,9 +285,15 @@ public final class NetworkMembershipService {
     }
 
     public synchronized Map<String, Object> acceptApproval(Map<String, Object> result, char[] password) throws Exception {
+        return acceptApproval(result, password, false);
+    }
+
+    public synchronized Map<String, Object> acceptApproval(Map<String, Object> result, char[] password,
+                                                           boolean filesystemConsent) throws Exception {
         if (network() != null) throw new IllegalStateException("This device already belongs to a network.");
         String status = text(result, "status");
         if (!"APPROVED".equals(status)) throw new IllegalArgumentException("The enrollment request has not been approved.");
+        String requestId = text(result, "requestId");
         String networkId = text(result, "networkId");
         String networkName = text(result, "networkName");
         String accountName = validateAccountName(text(result, "accountName"));
@@ -250,6 +305,28 @@ public final class NetworkMembershipService {
         }
         List<MembershipCertificate.CertificateInfo> chain = MembershipCertificate.chain(certificate);
         MembershipCertificate.CertificateInfo root = chain.getFirst();
+        boolean approvalVerified = false;
+        Object approvalValue = result.get("admissionApproval");
+        if (approvalValue instanceof String approvalText && !approvalText.isBlank()) {
+            Map<String, Object> approval = Json.object(approvalText);
+            MembershipCertificate.CertificateInfo approver = chain.stream()
+                    .filter(item -> item.nodeId().equals(own.issuerNodeId()))
+                    .findFirst()
+                    .orElseThrow(() -> new SecurityException("The admission approval issuer is not present in the certificate chain."));
+            AdmissionApproval.verifyWithCertificate(approval, approver.certificateJson(), networkId,
+                    requestId, own.nodeId(), identity.publicKeyBase64());
+            if (!own.nodeName().equals(AdmissionApproval.text(approval, "candidateNodeName"))
+                    || !own.endpoint().equals(AdmissionApproval.text(approval, "candidateEndpoint"))) {
+                throw new SecurityException("The admission approval is bound to a different device name or endpoint.");
+            }
+            String approvalDigest = sha256Hex(approvalText.getBytes(StandardCharsets.UTF_8));
+            if (store.getRecord("admissionApprovalUse", approvalDigest) != null) {
+                throw new SecurityException("This admission approval has already been used.");
+            }
+            store.putRecord("admissionApprovalUse", approvalDigest,
+                    Map.of("usedAt", Instant.now().toString(), "requestId", requestId));
+            approvalVerified = true;
+        }
         byte[] salt = Base64.getDecoder().decode(textFromMemberBundle(result, "salt", ""));
         if (salt.length == 0) {
             // Existing peers deliberately do not disclose the password verifier. The challenge salt is
@@ -267,19 +344,61 @@ public final class NetworkMembershipService {
         fields.put("rootNodeId", root.nodeId());
         fields.put("rootCertificate", root.certificateJson());
         fields.put("localCertificate", certificate);
+        fields.put("filesystemConsent", Boolean.toString(filesystemConsent));
+        fields.put("admissionApprovalVerified", Boolean.toString(approvalVerified));
         fields.put("createdAt", Instant.now().toString());
         store.putRecord("network", "active", fields);
         Object bundle = result.get("members");
         if (bundle instanceof List<?> list) {
+            Map<String, String> certificateByNode = new LinkedHashMap<>();
+            for (MembershipCertificate.CertificateInfo item : chain) {
+                certificateByNode.put(item.nodeId(), item.certificateJson());
+            }
+            List<Map<?, ?>> entries = new ArrayList<>();
+            java.util.Set<String> revokedIncoming = new java.util.HashSet<>();
             for (Object item : list) {
                 if (!(item instanceof Map<?, ?> map)) continue;
                 String memberCert = stringValue(map.get("certificate"));
                 if (memberCert.isBlank()) continue;
-                MembershipCertificate.CertificateInfo info = MembershipCertificate.verify(memberCert);
-                if (!info.networkId().equals(networkId)) throw new SecurityException("Member bundle contains a certificate from another network.");
-                String statusValue = stringValue(map.get("status"));
-                saveMember(info, "REVOKED".equals(statusValue) ? "REVOKED" : "ACTIVE",
+                MembershipCertificate.CertificateInfo info =
+                        MembershipCertificate.verifyForNetwork(memberCert, networkId, root.nodeId());
+                String knownCertificate = certificateByNode.putIfAbsent(info.nodeId(), memberCert);
+                if (knownCertificate != null && !knownCertificate.equals(memberCert)) {
+                    throw new SecurityException("The member bundle contains conflicting certificates for one device.");
+                }
+                for (MembershipCertificate.CertificateInfo chained : MembershipCertificate.chain(memberCert)) {
+                    certificateByNode.putIfAbsent(chained.nodeId(), chained.certificateJson());
+                }
+                if ("REVOKED".equals(stringValue(map.get("status")))) revokedIncoming.add(info.nodeId());
+                entries.add(map);
+            }
+            for (Map<?, ?> map : entries) {
+                String memberCert = stringValue(map.get("certificate"));
+                MembershipCertificate.CertificateInfo info =
+                        MembershipCertificate.verifyForNetwork(memberCert, networkId, root.nodeId());
+                for (MembershipCertificate.CertificateInfo chained : MembershipCertificate.chain(memberCert)) {
+                    if (!chained.nodeId().equals(info.nodeId()) && revokedIncoming.contains(chained.nodeId())) {
+                        throw new SecurityException("The member bundle contains a certificate chain through a revoked member.");
+                    }
+                }
+                boolean revoked = "REVOKED".equals(stringValue(map.get("status")));
+                String revocationText = stringValue(map.get("revocation"));
+                Map<String, Object> revocation = null;
+                if (revoked && !revocationText.isBlank()) {
+                    revocation = validateRevocation(revocationText, info.nodeId(), networkId,
+                            certificateByNode, revokedIncoming);
+                } else if (!revoked && !revocationText.isBlank()) {
+                    throw new SecurityException("The member bundle reported an active device with a revocation record.");
+                }
+                saveMember(info, revoked ? "REVOKED" : "ACTIVE",
                         stringValue(map.get("addedAt")), parseLong(map.get("lastSeenEpoch"), 0L));
+                if (revoked) {
+                    Map<String, String> imported = store.getRecord("member", info.nodeId());
+                    imported.put("revokedAt", stringValue(map.get("revokedAt")));
+                    imported.put("online", "false");
+                    if (revocation != null) imported.put("revocation", Json.stringify(revocation));
+                    store.putRecord("member", info.nodeId(), imported);
+                }
             }
         }
         saveMember(own, "ACTIVE", Instant.now().toString(), 0L);
@@ -377,6 +496,7 @@ public final class NetworkMembershipService {
             item.put("lastSeenEpoch", parseLong(row.get("lastSeenEpoch"), 0L));
             item.put("online", row.get("_id").equals(config.nodeId()) || isFreshOnline(row, Instant.now().getEpochSecond()));
             item.put("revokedAt", row.getOrDefault("revokedAt", ""));
+            if (row.get("revocation") != null) item.put("revocation", row.get("revocation"));
             result.add(item);
         }
         return List.copyOf(result);
@@ -384,35 +504,103 @@ public final class NetworkMembershipService {
 
     public synchronized void importMembers(List<?> incoming) throws Exception {
         String networkId = requireNetwork().get("networkId");
+        String rootNodeId = requireNetwork().get("rootNodeId");
+        List<Map<?, ?>> entries = new ArrayList<>();
+        Map<String, String> certificateByNode = new LinkedHashMap<>();
+        java.util.Set<String> revokedIncoming = new java.util.HashSet<>();
         for (Object value : incoming) {
             if (!(value instanceof Map<?, ?> map)) continue;
             String certificate = stringValue(map.get("certificate"));
             if (certificate.isBlank()) continue;
-            MembershipCertificate.CertificateInfo info = MembershipCertificate.verify(certificate);
-            if (!networkId.equals(info.networkId())) throw new SecurityException("A received member certificate belongs to another network.");
+            MembershipCertificate.CertificateInfo info =
+                    MembershipCertificate.verifyForNetwork(certificate, networkId, rootNodeId);
+            String knownCertificate = certificateByNode.putIfAbsent(info.nodeId(), certificate);
+            if (knownCertificate != null && !knownCertificate.equals(certificate)) {
+                throw new SecurityException("A member catalogue contains conflicting certificates for one device.");
+            }
+            List<MembershipCertificate.CertificateInfo> chain = MembershipCertificate.chain(certificate);
+            for (MembershipCertificate.CertificateInfo item : chain) {
+                certificateByNode.putIfAbsent(item.nodeId(), item.certificateJson());
+                Map<String, String> known = store.getRecord("member", item.nodeId());
+                if (known != null && "REVOKED".equals(known.get("status"))
+                        && !item.nodeId().equals(info.nodeId())) {
+                    throw new SecurityException("A received membership certificate passes through a revoked member.");
+                }
+            }
+            if ("REVOKED".equals(stringValue(map.get("status")))) revokedIncoming.add(info.nodeId());
+            entries.add(map);
+        }
+
+        for (Map<?, ?> map : entries) {
+            String certificate = stringValue(map.get("certificate"));
+            MembershipCertificate.CertificateInfo info =
+                    MembershipCertificate.verifyForNetwork(certificate, networkId, rootNodeId);
             Map<String, String> existing = store.getRecord("member", info.nodeId());
             if (existing != null && !info.certificateJson().equals(existing.get("certificate"))) {
                 throw new SecurityException("A received member catalogue attempted to replace an established device certificate.");
             }
-            // A stale peer catalogue must never reactivate an identity already revoked locally.
+            // Revocation is monotonic. A stale catalogue can never reactivate an
+            // identity that is already revoked locally.
             if (existing != null && "REVOKED".equals(existing.get("status"))) continue;
             String remoteStatus = stringValue(map.get("status"));
+            boolean revoked = "REVOKED".equals(remoteStatus);
+            Map<String, Object> revocation = null;
+            String revocationText = stringValue(map.get("revocation"));
+            if (revoked && !revocationText.isBlank()) {
+                revocation = validateRevocation(revocationText, info.nodeId(), networkId,
+                        certificateByNode, revokedIncoming);
+            } else if (!revoked && !revocationText.isBlank()) {
+                throw new SecurityException("A member catalogue reported an active device with a revocation record.");
+            }
             if (existing == null) {
-                saveMember(info, "REVOKED".equals(remoteStatus) ? "REVOKED" : "ACTIVE",
+                saveMember(info, revoked ? "REVOKED" : "ACTIVE",
                         stringValue(map.get("addedAt")), parseLong(map.get("lastSeenEpoch"), 0L));
-                if ("REVOKED".equals(remoteStatus)) {
+                if (revoked) {
                     Map<String, String> imported = store.getRecord("member", info.nodeId());
                     imported.put("revokedAt", stringValue(map.get("revokedAt")));
                     imported.put("online", "false");
+                    if (revocation != null) imported.put("revocation", Json.stringify(revocation));
                     store.putRecord("member", info.nodeId(), imported);
                 }
-            } else if ("REVOKED".equals(remoteStatus)) {
+            } else if (revoked) {
                 existing.put("status", "REVOKED");
                 existing.put("revokedAt", stringValue(map.get("revokedAt")));
                 existing.put("online", "false");
+                if (revocation != null) existing.put("revocation", Json.stringify(revocation));
                 store.putRecord("member", info.nodeId(), existing);
             }
         }
+    }
+
+    private Map<String, Object> validateRevocation(String revocationText, String revokedNodeId,
+                                                   String networkId, Map<String, String> certificateByNode,
+                                                   java.util.Set<String> revokedIncoming) throws Exception {
+        Map<String, Object> record = Json.object(revocationText);
+        String revokerNodeId = MembershipRevocation.text(record, "revokerNodeId");
+        if (revokerNodeId.equals(revokedNodeId)) {
+            throw new SecurityException("A member cannot revoke itself through a catalogue record.");
+        }
+        if (revokedIncoming.contains(revokerNodeId)) {
+            throw new SecurityException("A revoked member cannot issue a revocation record.");
+        }
+        String revokerCertificate = certificateByNode.get(revokerNodeId);
+        Map<String, String> localRevoker = store.getRecord("member", revokerNodeId);
+        if (localRevoker != null) {
+            if (!"ACTIVE".equals(localRevoker.getOrDefault("status", "ACTIVE"))) {
+                throw new SecurityException("A revocation record was issued by an inactive member.");
+            }
+            revokerCertificate = localRevoker.get("certificate");
+        }
+        if (revokerCertificate == null || revokerCertificate.isBlank()) {
+            throw new SecurityException("A revocation record was issued by an unknown member.");
+        }
+        MembershipCertificate.CertificateInfo revoker =
+                MembershipCertificate.verifyForNetwork(revokerCertificate, networkId,
+                        requireNetwork().get("rootNodeId"));
+        if (!revoker.nodeId().equals(revokerNodeId)) {
+            throw new SecurityException("A revocation record issuer certificate does not match its signer.");
+        }
+        return MembershipRevocation.verify(record, revoker.publicKey(), networkId, revokedNodeId);
     }
 
     private static boolean isFreshOnline(Map<String, String> member, long nowEpoch) {
@@ -511,7 +699,11 @@ public final class NetworkMembershipService {
         Map<String, String> localNetwork = requireNetwork();
         if (!info.nodeId().equals(nodeId) || !info.networkId().equals(localNetwork.get("networkId"))) return false;
         List<MembershipCertificate.CertificateInfo> chain;
-        try { chain = MembershipCertificate.chain(certificateJson); } catch (Exception invalid) { return false; }
+        try {
+            MembershipCertificate.verifyForNetwork(certificateJson, localNetwork.get("networkId"),
+                    localNetwork.get("rootNodeId"));
+            chain = MembershipCertificate.chain(certificateJson);
+        } catch (Exception invalid) { return false; }
         if (chain.isEmpty() || !chain.getFirst().nodeId().equals(localNetwork.get("rootNodeId"))) return false;
         Map<String, String> rootMember = store.getRecord("member", localNetwork.get("rootNodeId"));
         if (rootMember == null || "REVOKED".equals(rootMember.get("status"))) return false;
@@ -540,6 +732,10 @@ public final class NetworkMembershipService {
 
     public synchronized Map<String, String> createAuthHeaders(String method, String rawPath, byte[] body) throws Exception {
         Map<String, String> network = requireNetwork();
+        Map<String, String> local = store.getRecord("member", config.nodeId());
+        if (local == null || !"ACTIVE".equals(local.getOrDefault("status", "ACTIVE"))) {
+            throw new SecurityException("This device's network membership is not active; signed requests are refused.");
+        }
         long timestamp = Instant.now().getEpochSecond();
         String nonce = SecretFiles.randomToken();
         String bodyHash = sha256Hex(body == null ? new byte[0] : body);
@@ -595,12 +791,21 @@ public final class NetworkMembershipService {
 
     public synchronized void revokeMember(String nodeId) throws Exception {
         Map<String, String> network = requireNetwork();
+        Map<String, String> local = store.getRecord("member", config.nodeId());
+        if (local == null || !"ACTIVE".equals(local.getOrDefault("status", "ACTIVE"))) {
+            throw new SecurityException("Only an active member can revoke a network device.");
+        }
         if (nodeId.equals(config.nodeId())) throw new IllegalArgumentException("A device cannot revoke its own membership from itself.");
         if (nodeId.equals(network.get("rootNodeId"))) throw new IllegalArgumentException("The network's root identity is the trust anchor. It cannot be revoked without a network identity-rotation procedure.");
         Map<String, String> member = store.getRecord("member", nodeId);
         if (member == null) throw new IllegalArgumentException("Network member not found.");
+        if ("REVOKED".equals(member.get("status"))) return;
+        Map<String, Object> revocation = MembershipRevocation.create(network.get("networkId"), nodeId,
+                config.nodeId(), "Revoked by an active network member.", identity.privateKey());
         member.put("status", "REVOKED");
-        member.put("revokedAt", Instant.now().toString());
+        member.put("revokedAt", MembershipRevocation.text(revocation, "revokedAt"));
+        member.put("revocation", Json.stringify(revocation));
+        member.put("online", "false");
         store.putRecord("member", nodeId, member);
     }
 

@@ -102,6 +102,18 @@ No block striping, automatic replication, automatic synchronization, conflict re
 - Compares mappings from independent STUN endpoints and reports endpoint-dependent mapping as uncertainty rather than claiming a specific NAT type.
 - No router/firewall mutation, port-forwarding automation, automatic ICE traversal or relay fallback is introduced. Inbound TCP/TLS reachability remains explicitly unverified until checked from another network.
 
+### M5 delegated-admission and revocation increment — 2026-11-09
+
+- Added signed, short-lived `AdmissionApproval` records bound to the network, enrollment request UUID, candidate node identity/name/public key/endpoint, approver node ID and exact approver certificate SHA-256.
+- Admission authority is enforced locally: the root may always admit, and once at least two members are active any active member may admit independently. Inactive or revoked local members are refused.
+- Joining devices verify the approval signature, binding, lifetime and one-time use, and reject forged, altered, expired or replayed approvals.
+- Hardened certificate-chain validation: future-issued certificates, non-root self-issue, child certificates predating their issuer, duplicate device identities, and chains outside the expected network root are rejected.
+- Added signed monotonic `MembershipRevocation` records. Peers reject invalid or unauthorized revocation records, never reactivate a revoked identity from a stale catalogue, and refuse certificate chains that pass through a revoked member.
+- Broad filesystem consent is now explicit in enrollment (`network join --consent`, Android enrollment option) and existing-device upgrade; new devices default to no broad access.
+- Added `DelegatedAdmissionIntegrationTest` covering admission thresholds, independent approval, attribution, forged/altered/expired/replayed approvals, invalid chains, revocation propagation, stale conflicts, inactive/revoked approvers and consent.
+- Extended desktop–Android interoperability coverage: Android-issued approvals are accepted by the desktop core, Android-originated signed revocations are enforced, and consent defaults are checked end to end.
+- Remaining M5 work outside this increment: broader filesystem TOCTOU hardening, disk-full/abrupt-crash fault injection, and long-duration larger-network churn tests.
+
 ### M4 Android endpoint recovery increment — 2026-11-05
 
 - Added a pure-Java Android peer endpoint resolver that compares active IPv4 address bytes against X.509 IP SAN values without DNS lookup and rejects loopback, link-local, multicast and uncovered addresses.

@@ -20,11 +20,13 @@ PersonalCloud is a Java-only private network of personally operated devices. Eve
 
 ### Private network membership and catalogue
 - Desktop and Android peer-core support password-proved, challenge-based enrollment requests.
-- New devices remain pending until explicitly approved or rejected by an existing active member.
-- Per-device Ed25519 identities and chained signed membership certificates; device private keys are never shared.
+- New devices remain pending until explicitly approved or rejected by an existing active member. The founder admits the first additional device; once two members are active, any active member may admit independently.
+- Every admission returns a short-lived Ed25519-signed approval bound to the request, candidate identity/endpoint, approver node ID and exact approver certificate SHA-256. Inactive or revoked members cannot approve.
+- Per-device Ed25519 identities and chained signed membership certificates; device private keys are never shared. Chain validation rejects future issue, parent-order violations, duplicate identities and wrong roots.
 - Signed member requests bind method, path, timestamp, nonce and body digest; replay and stale requests are rejected.
 - Timestamp validation uses overflow-safe lower/upper-bound comparisons on desktop and Android peer core; regression tests reject correctly signed requests carrying extreme `Long.MIN_VALUE` timestamps.
-- Member revocation and signed catalogue exchange.
+- Member revocation uses signed monotonic records. Stale catalogues cannot reactivate a revoked member, and certificate chains passing through a revoked member are rejected.
+- Broad filesystem consent is explicit for new enrollment and existing-device upgrade; membership status reports when consent is required.
 - Direct heartbeat synchronization and online/offline status updates. The Android foreground service source schedules sync after startup and every 20 seconds for enrolled nodes.
 - Endpoint identity is checked against the expected member record during synchronization.
 

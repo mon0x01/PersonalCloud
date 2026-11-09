@@ -1,6 +1,10 @@
 package dev.personalcloud.android.core;
 
 import dev.personalcloud.control.LocalControlClient;
+import dev.personalcloud.core.AppConfig;
+import dev.personalcloud.core.StateStore;
+import dev.personalcloud.network.MembershipRevocation;
+import dev.personalcloud.network.NetworkMembershipService;
 
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
@@ -109,6 +113,8 @@ public final class DesktopInteropTest {
             control.networkApprove(enrollmentId);
             Map<String, Object> joined = androidMembership.refreshJoin(desktopCertificate.toString());
             check(Boolean.TRUE.equals(joined.get("joined")), "Android must install its certificate only after approval");
+            check(Boolean.FALSE.equals(androidMembership.status().get("filesystemConsent")),
+                    "Android enrollment must not silently grant broad filesystem access");
             boolean endpointIdentityMismatchRejected = false;
             try {
                 androidMembership.syncCatalogue(desktopBase, androidNodeId, desktopCertificate.toString());
@@ -127,6 +133,73 @@ public final class DesktopInteropTest {
             check(Boolean.TRUE.equals(restoredMembership.status().get("joined"))
                     && androidMembership.identity().publicKeyBase64().equals(restoredMembership.identity().publicKeyBase64()),
                     "Android membership certificate and per-device identity must survive state-store restart");
+
+            // Android, as an active member, must admit a third device independently.
+            // The desktop core must verify Android's signed approval and certificate chain.
+            Path thirdData = Files.createDirectory(workspace.resolve("third-desktop-data"));
+            Path thirdStorage = Files.createDirectory(workspace.resolve("third-desktop-storage"));
+            AppConfig thirdConfig = new AppConfig("Third Desktop", "third-desktop-01", "127.0.0.1",
+                    freePort(), thirdData, thirdStorage, null, "", 1024L * 1024 * 1024);
+            NetworkMembershipService thirdMembership = new NetworkMembershipService(
+                    new StateStore(thirdData), thirdConfig);
+            Map<String, Object> androidChallenge = androidMembership.createChallenge();
+            String androidNetworkId = String.valueOf(androidChallenge.get("networkId"));
+            byte[] thirdSalt = java.util.Base64.getDecoder().decode(
+                    String.valueOf(androidChallenge.get("salt")));
+            byte[] thirdVerifier = NetworkMembershipService.derivePasswordForEnrollment(
+                    networkPassword.toCharArray(), thirdSalt);
+            String thirdChallengeId = String.valueOf(androidChallenge.get("challengeId"));
+            String thirdPublicKey = thirdMembership.identity().publicKeyBase64();
+            String thirdEndpoint = thirdMembership.localEndpointForProtocol();
+            String thirdProof = NetworkMembershipService.enrollmentProof(thirdVerifier, androidNetworkId,
+                    "interop", thirdChallengeId, String.valueOf(androidChallenge.get("nonce")),
+                    thirdConfig.nodeId(), thirdConfig.nodeName(), thirdPublicKey, thirdEndpoint);
+            byte[] thirdSignaturePayload = NetworkMembershipService.enrollmentSignaturePayload(androidNetworkId,
+                    thirdConfig.nodeId(), thirdConfig.nodeName(), thirdPublicKey, thirdEndpoint,
+                    thirdChallengeId, thirdProof);
+            Map<String, Object> thirdRequest = new LinkedHashMap<>();
+            thirdRequest.put("networkId", androidNetworkId);
+            thirdRequest.put("accountName", "interop");
+            thirdRequest.put("challengeId", thirdChallengeId);
+            thirdRequest.put("nodeId", thirdConfig.nodeId());
+            thirdRequest.put("nodeName", thirdConfig.nodeName());
+            thirdRequest.put("publicKey", thirdPublicKey);
+            thirdRequest.put("endpoint", thirdEndpoint);
+            thirdRequest.put("proof", thirdProof);
+            thirdRequest.put("signature", java.util.Base64.getEncoder().encodeToString(
+                    thirdMembership.identity().sign(thirdSignaturePayload)));
+            String thirdRequestId = String.valueOf(
+                    androidMembership.submitEnrollment(thirdRequest).get("requestId"));
+            Map<String, Object> thirdApproved = androidMembership.approve(thirdRequestId);
+            Map<String, Object> thirdApproval = Json.object(
+                    String.valueOf(thirdApproved.get("admissionApproval")));
+            check(androidNodeId.equals(thirdApproval.get("approverNodeId")),
+                    "Android must issue an attributable signed admission approval");
+            Map<String, Object> thirdJoined = thirdMembership.acceptApproval(
+                    thirdApproved, networkPassword.toCharArray(), true);
+            check(Boolean.TRUE.equals(thirdJoined.get("joined")),
+                    "desktop core must accept an Android-issued approval and certificate chain");
+            check(Boolean.TRUE.equals(thirdMembership.status().get("filesystemConsent")),
+                    "a desktop device admitted through Android must persist its explicit consent");
+            Map<String, String> thirdHeaders = thirdMembership.createAuthHeaders(
+                    "GET", "/network/members", new byte[0]);
+            check(androidMembership.authenticate("GET", "/network/members", thirdHeaders, new byte[0]),
+                    "Android must authenticate the desktop member admitted by its own approval");
+
+            // Android-originated revocation must be signed and enforced immediately.
+            androidMembership.revokeMember(thirdConfig.nodeId());
+            Map<String, Object> revokedThird = null;
+            for (Map<String, Object> wire : androidMembership.membersForWire()) {
+                if (thirdConfig.nodeId().equals(wire.get("nodeId"))) revokedThird = wire;
+            }
+            check(revokedThird != null && "REVOKED".equals(revokedThird.get("status")),
+                    "Android must apply and expose a signed revocation");
+            MembershipRevocation.verify(Json.object(String.valueOf(revokedThird.get("revocation"))),
+                    androidMembership.identity().publicKey(), androidNetworkId, thirdConfig.nodeId());
+            Map<String, String> revokedThirdHeaders = thirdMembership.createAuthHeaders(
+                    "GET", "/network/members", new byte[0]);
+            check(!androidMembership.authenticate("GET", "/network/members", revokedThirdHeaders, new byte[0]),
+                    "Android must reject requests from a member it revoked");
 
             // Android writes to the desktop owner's actual eligible filesystem through the
             // same signed protocol; every mutation is authorized by the owning peer.

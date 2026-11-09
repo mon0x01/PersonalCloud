@@ -329,7 +329,8 @@ public final class LocalControlServer implements AutoCloseable {
                         char[] password = string(request, "password").toCharArray();
                         try {
                             Map<String, Object> result = new NetworkEnrollmentClient().join(string(request, "baseUrl"),
-                                    optionalString(request, "accountName", ""), password, config, membership.identity(), membership);
+                                    optionalString(request, "accountName", ""), password, config, membership.identity(), membership,
+                                    booleanValue(request, "filesystemConsent", false));
                             respond(output, responseStarted, Map.of("ok", true, "network", result));
                         } finally { java.util.Arrays.fill(password, '\0'); }
                     }
@@ -552,10 +553,20 @@ public final class LocalControlServer implements AutoCloseable {
                             "filesystem", filesystem.status()));
                     case "filesystem.roots" -> respond(output, responseStarted, Map.of("ok", true,
                             "roots", filesystem.rootsForOwner()));
-                    case "filesystem.consent" -> respond(output, responseStarted, Map.of("ok", true,
-                            "filesystem", filesystem.grantConsent()));
-                    case "filesystem.revoke-consent" -> respond(output, responseStarted, Map.of("ok", true,
-                            "filesystem", filesystem.revokeConsent()));
+                    case "filesystem.consent" -> {
+                        Map<String, Object> granted = filesystem.grantConsent();
+                        if (Boolean.TRUE.equals(membership.status().get("joined"))) {
+                            membership.recordFilesystemConsent(true);
+                        }
+                        respond(output, responseStarted, Map.of("ok", true, "filesystem", granted));
+                    }
+                    case "filesystem.revoke-consent" -> {
+                        Map<String, Object> revoked = filesystem.revokeConsent();
+                        if (Boolean.TRUE.equals(membership.status().get("joined"))) {
+                            membership.recordFilesystemConsent(false);
+                        }
+                        respond(output, responseStarted, Map.of("ok", true, "filesystem", revoked));
+                    }
                     case "filesystem.remote.roots" -> {
                         String memberId = string(request, "memberId");
                         Map<String, Object> response = new NetworkPeerClient().listFilesystemRoots(

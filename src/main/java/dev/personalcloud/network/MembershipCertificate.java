@@ -16,6 +16,7 @@ import java.util.Map;
 /** A small signed certificate chain rooted in the first device's Ed25519 public key. */
 public final class MembershipCertificate {
     private static final int MAX_CHAIN_DEPTH = 32;
+    private static final long CLOCK_SKEW_SECONDS = 120;
     private MembershipCertificate() { }
 
     public static String createRoot(String nodeId, String nodeName, String endpoint, String publicKey,
@@ -57,6 +58,14 @@ public final class MembershipCertificate {
                 issuerNodeId, issuerCertificateEncoded, issuedAt);
         byte[] signature = Base64.getDecoder().decode(signatureText);
         if (signature.length != 64) throw new SecurityException("Invalid membership certificate signature length.");
+        java.time.Instant issuedInstant;
+        try { issuedInstant = java.time.Instant.parse(issuedAt); }
+        catch (java.time.format.DateTimeParseException invalid) {
+            throw new SecurityException("Membership certificate has an invalid issue time.");
+        }
+        if (issuedInstant.isAfter(java.time.Instant.now().plusSeconds(CLOCK_SKEW_SECONDS))) {
+            throw new SecurityException("Membership certificate was issued in the future.");
+        }
 
         if (issuerCertificateEncoded.isBlank()) {
             if (!nodeId.equals(issuerNodeId)) throw new SecurityException("The network root certificate must be self-issued.");
@@ -68,26 +77,49 @@ public final class MembershipCertificate {
                 throw new SecurityException("The network root certificate signature is invalid.");
             }
         } else {
+            if (nodeId.equals(issuerNodeId)) {
+                throw new SecurityException("A non-root membership certificate cannot be self-issued.");
+            }
             String issuerJson = new String(Base64.getDecoder().decode(issuerCertificateEncoded), StandardCharsets.UTF_8);
             CertificateInfo issuer = verify(issuerJson, depth + 1);
             if (!issuer.networkId().equals(networkId) || !issuer.nodeId().equals(issuerNodeId)) {
                 throw new SecurityException("Membership certificate issuer does not match its parent certificate.");
             }
+            if (issuedInstant.isBefore(java.time.Instant.parse(issuer.issuedAt()))) {
+                throw new SecurityException("Membership certificate predates its issuer certificate.");
+            }
             if (!DeviceIdentity.verify(issuer.publicKey(), canonical(payload), signature)) {
                 throw new SecurityException("Membership certificate signature is invalid.");
             }
         }
-        java.time.Instant.parse(issuedAt);
         validateEndpoint(endpoint);
         return new CertificateInfo(networkId, nodeId, nodeName, endpoint, publicKey, publicKeyText,
                 issuerNodeId, issuerCertificateEncoded, issuedAt, certificateJson);
     }
 
+    /** Verifies a certificate and requires it to belong to the expected network and root. */
+    public static CertificateInfo verifyForNetwork(String certificateJson, String networkId,
+                                                   String rootNodeId) throws Exception {
+        CertificateInfo info = verify(certificateJson);
+        if (!info.networkId().equals(networkId)) {
+            throw new SecurityException("Membership certificate belongs to a different network.");
+        }
+        List<CertificateInfo> chain = chain(certificateJson);
+        if (chain.isEmpty() || !chain.getFirst().nodeId().equals(rootNodeId)) {
+            throw new SecurityException("Membership certificate is not rooted in the expected network identity.");
+        }
+        return info;
+    }
+
     public static List<CertificateInfo> chain(String certificateJson) throws Exception {
         List<CertificateInfo> result = new ArrayList<>();
+        java.util.Set<String> seen = new java.util.HashSet<>();
         String current = certificateJson;
         while (true) {
             CertificateInfo info = verify(current);
+            if (!seen.add(info.nodeId())) {
+                throw new SecurityException("Membership certificate chain contains a duplicate device identity.");
+            }
             result.add(info);
             if (info.issuerCertificate().isBlank()) break;
             current = new String(Base64.getDecoder().decode(info.issuerCertificate()), StandardCharsets.UTF_8);

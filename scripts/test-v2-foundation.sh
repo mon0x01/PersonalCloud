@@ -40,6 +40,7 @@ for test in \
   dev.personalcloud.storage.ReferenceFileSystemModelCacheTest \
   dev.personalcloud.protocol.PeerProtocolServerTest \
   dev.personalcloud.network.NetworkMembershipServiceTest \
+  dev.personalcloud.network.DelegatedAdmissionIntegrationTest \
   dev.personalcloud.network.NetworkProtocolIntegrationTest \
   dev.personalcloud.network.RemoteReferenceIntegrationTest \
   dev.personalcloud.network.ManagedStorageIntegrationTest \
