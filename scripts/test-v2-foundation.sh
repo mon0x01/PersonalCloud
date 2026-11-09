@@ -44,6 +44,7 @@ for test in \
   dev.personalcloud.network.RemoteReferenceIntegrationTest \
   dev.personalcloud.network.ManagedStorageIntegrationTest \
   dev.personalcloud.network.EligibleStorageIntegrationTest \
+  dev.personalcloud.network.CoordinatedTransferIntegrationTest \
   dev.personalcloud.network.NetworkPeerClientRangeValidationTest \
   dev.personalcloud.network.OutboundTransferQueueTest \
   dev.personalcloud.policy.FilesystemPolicyServiceTest \

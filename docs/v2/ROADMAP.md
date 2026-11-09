@@ -28,6 +28,16 @@ Development proceeds toward a coherent, direct-only private device network. Auto
 - Offline search metadata cache is explicitly marked stale/unavailable.
 - Automated two-node integration tests exercise both directions between desktop and Android peer-core.
 
+## M2.1 — Three-peer coordinated transfers — implemented
+- Short-lived Ed25519-signed tickets issued by coordinator Z bind source/destination devices, eligible roots and paths, operation, source version, size, digest, expiry, request/transfer identity and optional owner approvals.
+- X and Y verify tickets independently against the issuer's active membership key, enforce role/expiry checks and persist durable per-role claims. Same-transfer retries are idempotent; rebinding a ticket to another transfer is rejected.
+- X streams resumable chunks directly to Y through the existing receiver session engine. Z exchanges metadata and status only and never receives, stages or relays file bytes.
+- COPY and safe MOVE: destination authorization and staging, full integrity verification, destination commit, source revalidation, durable `DELETING` intent, then source deletion. Deletion failure reports `COPIED_NOT_MOVED`; retries reconcile without retransferring or losing the only copy.
+- Source PRIVATE/PROTECTED policy and independent owner approvals are enforced at X; destination overwrite approvals are enforced at Y. Revoked source, destination or coordinator members are rejected.
+- Desktop local control/CLI exposes `coordinated plan`, `prepare`, `transfer`, `status`, `retry` and `list`.
+- Three-node automated tests cover direct X→Y isolation, coordinator metadata-only state, invalid/expired/tampered/replayed tickets, wrong source/destination/path/digest, source mutation, destination failure, interruption recovery, protected approvals and revocation.
+- Remaining: Android coordinator/UI integration and live multi-device acceptance testing.
+
 ## M3 — Writable native integration — implemented and automatically tested
 - Linux FUSE2 adapter over the shared read-write virtual filesystem model.
 - Writable eligible storage at `/Devices/<device>/Filesystem/<root>/...`; reference and managed planes remain read-only.
@@ -48,7 +58,7 @@ Development proceeds toward a coherent, direct-only private device network. Auto
 - Android operational controls expose network bootstrap, password-proof join, approval polling, selectable request approval/rejection, member listing/revocation and owner-local recovery snapshot listing/restore. These controls are functional, not a final visual redesign.
 - Android now has a Keystore-encrypted persistent outbound queue, durable SAF source URI retention, restart retry, queue inspection, manual resume and abort.
 - Implemented: Android foreground service observes default-network and link-property changes. When the active IPv4 address is already covered by the TLS certificate IP SAN, it persists and advertises the changed endpoint without changing the signed membership certificate. An uncovered address fails closed with an explicit renewal status.
-- Remaining: Android SDK/Gradle compile and APK packaging; physical-device lifecycle, SAF provider, proxy descriptor, storage and network validation; reduce remaining manual identifier entry and improve transfer/recovery status presentation. Dynamic address recovery is still limited to the certificate's provisioned IPv4 SAN set; IPv6 listener support, DNS-SD/mDNS and cross-network NAT traversal remain separate work.
+- Remaining: Android SDK/Gradle compile and APK packaging; physical-device lifecycle, SAF provider, proxy descriptor, storage and network validation; reduce remaining manual identifier entry and improve transfer/recovery status presentation. Android UI integration for three-peer coordinated transfers remains outstanding. Dynamic address recovery is still limited to the certificate's provisioned IPv4 SAN set; IPv6 listener support, DNS-SD/mDNS and cross-network NAT traversal remain separate work.
 - Final UI redesign remains dependent on product-owner UX feedback.
 
 ## M5 — Operational hardening and production readiness — in progress

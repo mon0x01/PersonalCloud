@@ -325,11 +325,10 @@ This section records the status at the latest completed milestone and is updated
 - Owner policy foundation: persistent NORMAL/PRIVATE/PROTECTED rules, policy epoch, owner-only local control/CLI management, and short-lived single-use protection approvals.
 - Eligible-root filesystem access (M2): owner consent, OS-user ownership boundaries, system/credential/PersonalCloud-state exclusions, signed `/network/fs/*` browse/stat/bounded-range/download/create/write/move/delete routes, source-side PRIVATE hiding and PROTECTED approval enforcement, atomic SHA-256-verified writes, no-overwrite publication, and separate source/destination approvals for protected moves.
 - Writable native integration (M3): Linux FUSE create/write/read/mkdir/rename/delete/truncate with safe staging and flush/release publication; Android DocumentsProvider create/write/rename/move/delete through signed owner-authorized calls; native-adapter tests for round trips, no-overwrite conflicts, concurrent writers, failed/rejected commits, traversal and symlink escapes, PRIVATE/PROTECTED enforcement and consent revocation.
+- Three-peer coordinated transfers (M2.1): a coordinator Z issues a short-lived Ed25519-signed ticket binding source, destination, roots/paths, operation, version, size, digest, expiry, request/transfer identity and optional approvals. X and Y verify independently and durably claim the ticket per role. X streams resumable chunks directly to Y; Z exchanges metadata and status only and never receives bytes. COPY and safe MOVE are implemented with destination commit and source revalidation before deletion, a durable `DELETING` state, honest `COPIED_NOT_MOVED` partial outcomes, idempotent retries and revoked-member rejection. Desktop local control/CLI exposes `coordinated plan/prepare/transfer/status/retry/list`; three-node automated tests cover direct X→Y isolation, invalid/expired/replayed tickets, wrong identities/paths/digests, source mutation, destination failure, interruption recovery, protected approvals and revocation.
 
 ### 9.2 Target functionality not yet implemented
 
-- Third-device transfer coordination (Z initiates X→Y).
-- Safe cross-device move service with crash recovery and partial-outcome reporting.
 - Delegated admission capability (`ADMIT`) and signed revocation records with epochs.
 - Per-member TLS endpoint pinning, enrollment rate limiting, JSON depth limits, per-uploader transfer quotas.
 - Complete `docs/` documentation structure and ADRs beyond M0.
@@ -349,6 +348,8 @@ This section records the status at the latest completed milestone and is updated
 - Android DocumentsProvider writable operations require an active membership and a reachable owner; there is no offline write queue.
 - No live Linux FUSE mount/kernel callback validation.
 - No physical Android device/lifecycle/SAF validation.
+- Coordinated transfers are exposed through the desktop local-control socket and CLI; Android coordinator/UI integration is not yet implemented.
+- Coordinated ticket claims, source jobs and coordinator requests are node-local durable state. Device clock skew beyond 120 seconds fails closed.
 - No root succession/rotation (deferred by decision).
 - No NAT traversal or relay.
 - No mandatory at-rest encryption.

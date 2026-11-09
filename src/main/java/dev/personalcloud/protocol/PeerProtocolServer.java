@@ -24,7 +24,9 @@ import dev.personalcloud.policy.ApprovalRequiredException;
 import dev.personalcloud.policy.FilesystemPolicyService;
 import dev.personalcloud.policy.PolicyOperation;
 import dev.personalcloud.policy.ProtectionApprovalService;
+import dev.personalcloud.network.CoordinatedTransferService;
 import dev.personalcloud.transfer.ResumableTransferManager;
+import dev.personalcloud.transfer.TransferTicketService;
 
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
@@ -66,6 +68,8 @@ public final class PeerProtocolServer implements AutoCloseable {
     private final EligibleStorageService filesystem;
     private final SecurityMonitor security = new SecurityMonitor();
     private ResumableTransferManager transfers;
+    private TransferTicketService tickets;
+    private CoordinatedTransferService coordinated;
     private HttpServer server;
     private ExecutorService executor;
 
@@ -159,10 +163,18 @@ public final class PeerProtocolServer implements AutoCloseable {
     }
 
     public void start() throws Exception {
+        tickets = new TransferTicketService(new dev.personalcloud.core.StateStore(config.dataDirectory()), membership);
+        coordinated = new CoordinatedTransferService(config, membership, filesystem, tickets,
+                new dev.personalcloud.network.NetworkPeerClient(),
+                new dev.personalcloud.core.StateStore(config.dataDirectory()));
         transfers = new ResumableTransferManager(config.dataDirectory().resolve("transfer-sessions"),
-                config.nodeId(), config.maxFileBytes(),
+                config.nodeId(), config.maxFileBytes(), ResumableTransferManager.DEFAULT_CHUNK_BYTES,
                 (transferId, uploader, relative, content, size, sha256) ->
-                        managedStorage.receiveTransfer(transferId, uploader, relative, content, size, sha256));
+                        managedStorage.receiveTransfer(transferId, uploader, relative, content, size, sha256),
+                (transferId, uploader, relative, content, size, sha256, session) ->
+                        filesystem.writeCoordinated(session.get("requester"), session.get("rootId"), relative,
+                                content, size, sha256, Boolean.parseBoolean(session.get("overwrite")),
+                                session.getOrDefault("destinationApprovalId", ""), session.get("ticketId")));
         InetSocketAddress address = new InetSocketAddress(config.bindAddress(), config.port());
         if (config.tlsKeystore() != null) {
             KeyStore keyStore = KeyStore.getInstance("PKCS12");
@@ -265,6 +277,49 @@ public final class PeerProtocolServer implements AutoCloseable {
             handleFilesystemApi(exchange, path, method);
             return;
         }
+        if ("GET".equals(method) && "/network/coordinated/metadata".equals(path)) {
+            String member = authenticateMember(exchange, method, new byte[0]);
+            if (member == null) return;
+            Map<String, String> query = queryParameters(exchange.getRequestURI().getRawQuery());
+            String role = query.getOrDefault("role", "source").toLowerCase(java.util.Locale.ROOT);
+            String rootId = query.getOrDefault("rootId", "");
+            String relativePath = query.getOrDefault("path", "");
+            Map<String, Object> metadata = role.equals("destination")
+                    ? filesystem.destinationMetadata(member, rootId, relativePath)
+                    : filesystem.transferMetadata(member, rootId, relativePath);
+            sendJson(exchange, 200, metadata);
+            return;
+        }
+        if ("POST".equals(method) && "/network/coordinated/transfers".equals(path)) {
+            byte[] body = readLimitedBody(exchange.getRequestBody(), 64 * 1024);
+            if (!membership.authenticate(method, exchange.getRequestURI().toASCIIString(),
+                    exchange.getRequestHeaders(), body)) {
+                sendJson(exchange, 401, Map.of("error", "A valid active PersonalCloud network-member identity is required."));
+                return;
+            }
+            String requester = exchange.getRequestHeaders().getFirst("X-PC-Node-ID");
+            Map<String, Object> request = Json.object(new String(body, StandardCharsets.UTF_8));
+            Object ticketValue = request.get("ticket");
+            if (!(ticketValue instanceof Map<?, ?>)) {
+                throw new IllegalArgumentException("A coordinated transfer ticket is required.");
+            }
+            @SuppressWarnings("unchecked") Map<String, Object> ticket = (Map<String, Object>) ticketValue;
+            Map<String, Object> result = coordinated.executeSource(ticket,
+                    string(request, "ticketSignature"), requester);
+            audit.record("COORDINATED_TRANSFER_EXECUTED", requester,
+                    "ticket=" + TransferTicketService.text(ticket, "ticketId")
+                            + ", transfer=" + TransferTicketService.text(ticket, "transferId")
+                            + ", state=" + result.get("state"));
+            sendJson(exchange, 200, result);
+            return;
+        }
+        if ("GET".equals(method) && path.startsWith("/network/coordinated/transfers/")) {
+            String member = authenticateMember(exchange, method, new byte[0]);
+            if (member == null) return;
+            String requestId = decode(path.substring("/network/coordinated/transfers/".length()));
+            sendJson(exchange, 200, coordinated.sourceStatus(member, requestId));
+            return;
+        }
 
         if ("POST".equals(method) && "/network/transfers".equals(path)) {
             byte[] body = readLimitedBody(exchange.getRequestBody(), 64 * 1024);
@@ -275,6 +330,44 @@ public final class PeerProtocolServer implements AutoCloseable {
             }
             Map<String, Object> request = Json.object(new String(body, StandardCharsets.UTF_8));
             String uploader = exchange.getRequestHeaders().getFirst("X-PC-Node-ID");
+            if ("coordinated".equals(optionalString(request, "kind"))) {
+                Object ticketValue = request.get("ticket");
+                if (!(ticketValue instanceof Map<?, ?>)) {
+                    throw new IllegalArgumentException("A coordinated transfer ticket is required.");
+                }
+                @SuppressWarnings("unchecked") Map<String, Object> ticket = (Map<String, Object>) ticketValue;
+                String ticketSignature = string(request, "ticketSignature");
+                tickets.verify(ticket, ticketSignature);
+                String issuer = TransferTicketService.text(ticket, "issuerNodeId");
+                String source = TransferTicketService.text(ticket, "sourceNodeId");
+                String destination = TransferTicketService.text(ticket, "destinationNodeId");
+                if (!uploader.equals(source)) {
+                    throw new SecurityException("The coordinated transfer must be uploaded by the ticket's source device.");
+                }
+                if (!config.nodeId().equals(destination)) {
+                    throw new SecurityException("The coordinated ticket is not bound to this destination device.");
+                }
+                String transferId = TransferTicketService.text(ticket, "transferId");
+                String requestId = TransferTicketService.text(ticket, "requestId");
+                String ticketId = TransferTicketService.text(ticket, "ticketId");
+                if (!transferId.equals(String.valueOf(request.getOrDefault("transferId", "")))) {
+                    throw new SecurityException("The coordinated transfer identity does not match its ticket.");
+                }
+                tickets.claim(ticket, "DESTINATION", transferId, requestId);
+                String rootId = TransferTicketService.text(ticket, "destinationRootId");
+                String destinationPath = TransferTicketService.text(ticket, "destinationPath");
+                boolean overwrite = TransferTicketService.bool(ticket, "overwrite");
+                long size = TransferTicketService.number(ticket, "size");
+                String sha256 = TransferTicketService.text(ticket, "sha256");
+                String destinationApprovalId = optionalString(ticket, "destinationApprovalId");
+                filesystem.authorizeCoordinatedWrite(issuer, rootId, destinationPath, overwrite,
+                        destinationApprovalId, ticketId, size, sha256);
+                Map<String, Object> created = transfers.createCoordinated(uploader, transferId, issuer,
+                        rootId, destinationPath, size, sha256, overwrite,
+                        TransferTicketService.operation(ticket), ticketId, requestId, destinationApprovalId);
+                sendJson(exchange, 201, created);
+                return;
+            }
             String requestedTransferId = String.valueOf(request.getOrDefault("transferId", ""));
             Map<String, Object> created = requestedTransferId.isBlank()
                     ? transfers.create(uploader, String.valueOf(request.getOrDefault("path", "")),

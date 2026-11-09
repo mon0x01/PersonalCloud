@@ -187,8 +187,13 @@ public final class Json {
             }
             if (start == index) throw error("Invalid number");
             String number = text.substring(start, index);
-            try { return decimal ? Double.parseDouble(number) : Long.parseLong(number); }
-            catch (NumberFormatException ex) { throw error("Invalid number"); }
+            try {
+                // Keep integral JSON numbers as Long. A conditional expression with
+                // double/long operands would promote every integer to double and
+                // break canonical signatures over parsed request bodies.
+                if (decimal) return Double.parseDouble(number);
+                return Long.parseLong(number);
+            } catch (NumberFormatException ex) { throw error("Invalid number"); }
         }
 
         private Object literal(String expected, Object result) {

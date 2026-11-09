@@ -12,8 +12,10 @@ import dev.personalcloud.core.SecretFiles;
 import dev.personalcloud.network.NetworkMembershipService;
 import dev.personalcloud.network.NetworkEnrollmentClient;
 import dev.personalcloud.network.DeviceCatalogueService;
+import dev.personalcloud.network.CoordinatedTransferService;
 import dev.personalcloud.network.NetworkPeerClient;
 import dev.personalcloud.network.OutboundTransferQueue;
+import dev.personalcloud.transfer.TransferTicketService;
 import dev.personalcloud.core.StateStore;
 import dev.personalcloud.storage.ReferenceGrantService;
 import dev.personalcloud.storage.ReferenceVersionService;
@@ -76,6 +78,7 @@ public final class LocalControlServer implements AutoCloseable {
     private final ProtectionApprovalService approvals;
     private final EligibleStorageService filesystem;
     private final OutboundTransferQueue outboundTransfers;
+    private final CoordinatedTransferService coordinated;
     private final java.util.concurrent.ScheduledExecutorService transferRetryScheduler =
             Executors.newSingleThreadScheduledExecutor(r -> {
                 Thread thread = new Thread(r, "personalcloud-transfer-retry");
@@ -113,8 +116,12 @@ public final class LocalControlServer implements AutoCloseable {
         this.approvals = approvals;
         this.filesystem = filesystem;
         try {
-            this.outboundTransfers = new OutboundTransferQueue(new StateStore(config.dataDirectory()), membership,
+            StateStore coordinatedState = new StateStore(config.dataDirectory());
+            this.outboundTransfers = new OutboundTransferQueue(coordinatedState, membership,
                     this::requireMemberEndpoint, config.maxFileBytes());
+            this.coordinated = new CoordinatedTransferService(config, membership, filesystem,
+                    new TransferTicketService(coordinatedState, membership), new NetworkPeerClient(),
+                    new StateStore(config.dataDirectory()));
         } catch (Exception failure) {
             throw new IllegalStateException("Unable to initialize the durable outbound transfer queue.", failure);
         }
@@ -624,6 +631,39 @@ public final class LocalControlServer implements AutoCloseable {
                         result.put("ok", true);
                         respond(output, responseStarted, result);
                     }
+                    case "coordinated.plan" -> respond(output, responseStarted, Map.of("ok", true,
+                            "plan", coordinated.plan(string(request, "sourceNodeId"),
+                                    string(request, "sourceRootId"), optionalString(request, "sourcePath", ""),
+                                    string(request, "destinationNodeId"), string(request, "destinationRootId"),
+                                    string(request, "destinationPath"))));
+                    case "coordinated.prepare" -> {
+                        CoordinatedTransferService.Prepared prepared = coordinated.prepare(
+                                string(request, "sourceNodeId"), string(request, "sourceRootId"),
+                                optionalString(request, "sourcePath", ""), string(request, "destinationNodeId"),
+                                string(request, "destinationRootId"), string(request, "destinationPath"),
+                                string(request, "operation"), booleanValue(request, "overwrite", false),
+                                optionalString(request, "sourceApprovalId", ""),
+                                optionalString(request, "destinationApprovalId", ""),
+                                longValue(request, "ttlSeconds", 0));
+                        respond(output, responseStarted, Map.of("ok", true, "requestId", prepared.requestId(),
+                                "ticketId", prepared.ticketId(), "transferId", prepared.transferId(),
+                                "ticket", prepared.ticket(), "ticketSignature", prepared.signature()));
+                    }
+                    case "coordinated.transfer" -> respond(output, responseStarted, Map.of("ok", true,
+                            "transfer", coordinated.coordinate(string(request, "sourceNodeId"),
+                                    string(request, "sourceRootId"), optionalString(request, "sourcePath", ""),
+                                    string(request, "destinationNodeId"), string(request, "destinationRootId"),
+                                    string(request, "destinationPath"), string(request, "operation"),
+                                    booleanValue(request, "overwrite", false),
+                                    optionalString(request, "sourceApprovalId", ""),
+                                    optionalString(request, "destinationApprovalId", ""),
+                                    longValue(request, "ttlSeconds", 0))));
+                    case "coordinated.status" -> respond(output, responseStarted, Map.of("ok", true,
+                            "status", coordinated.status(string(request, "requestId"))));
+                    case "coordinated.retry" -> respond(output, responseStarted, Map.of("ok", true,
+                            "transfer", coordinated.retry(string(request, "requestId"))));
+                    case "coordinated.list" -> respond(output, responseStarted, Map.of("ok", true,
+                            "requests", coordinated.list()));
                     default -> throw new IllegalArgumentException("Unsupported local control command.");
                 }
             } catch (Exception failure) {

@@ -25,11 +25,25 @@ public final class ResumableTransferManager {
                                    InputStream content, long size, String sha256) throws Exception;
     }
 
+    /**
+     * Commit boundary for coordinated filesystem sessions. Unlike the managed
+     * committer it receives the durable session metadata (destination root,
+     * operation, ticket identity and requester) so the destination can apply
+     * its own authorization and idempotent publication rules.
+     */
+    @FunctionalInterface
+    public interface SessionCommitter {
+        Map<String, Object> commit(String transferId, String uploaderNodeId, String relativePath,
+                                   InputStream content, long size, String sha256,
+                                   Map<String, String> session) throws Exception;
+    }
+
     private final Path root;
     private final String ownerNodeId;
     private final long maxFileBytes;
     private final int chunkBytes;
     private final Committer committer;
+    private final SessionCommitter sessionCommitter;
     private final java.util.concurrent.locks.ReentrantLock[] sessionLocks = createSessionLocks();
 
     public ResumableTransferManager(Path dataDirectory, String ownerNodeId, long maxFileBytes,
@@ -39,6 +53,12 @@ public final class ResumableTransferManager {
 
     public ResumableTransferManager(Path dataDirectory, String ownerNodeId, long maxFileBytes,
                                     int chunkBytes, Committer committer) throws Exception {
+        this(dataDirectory, ownerNodeId, maxFileBytes, chunkBytes, committer, null);
+    }
+
+    public ResumableTransferManager(Path dataDirectory, String ownerNodeId, long maxFileBytes,
+                                    int chunkBytes, Committer committer,
+                                    SessionCommitter sessionCommitter) throws Exception {
         if (ownerNodeId == null || ownerNodeId.isBlank()) throw new IllegalArgumentException("Owner node identity is required.");
         if (maxFileBytes < 0 || chunkBytes < 64 * 1024 || chunkBytes > 16 * 1024 * 1024) {
             throw new IllegalArgumentException("Invalid transfer size limits.");
@@ -47,6 +67,7 @@ public final class ResumableTransferManager {
         this.maxFileBytes = maxFileBytes;
         this.chunkBytes = chunkBytes;
         this.committer = Objects.requireNonNull(committer);
+        this.sessionCommitter = sessionCommitter;
         Files.createDirectories(dataDirectory);
         if (Files.isSymbolicLink(dataDirectory)) throw new SecurityException("Transfer data directory cannot be a symbolic link.");
         this.root = dataDirectory.toRealPath();
@@ -114,6 +135,99 @@ public final class ResumableTransferManager {
         p.setProperty("path", path);
         p.setProperty("size", Long.toString(size));
         p.setProperty("sha256", digest);
+        p.setProperty("chunkBytes", Integer.toString(chunkBytes));
+        p.setProperty("createdAt", Long.toString(System.currentTimeMillis()));
+        p.setProperty("state", "RECEIVING");
+        save(dir, p);
+        return statusFor(id, p);
+    }
+
+    /**
+     * Creates or idempotently reopens a coordinated filesystem session. The
+     * session is still bound to the authenticated uploader (the source node),
+     * while authorization metadata is bound to the coordinating requester.
+     */
+    public synchronized Map<String, Object> createCoordinated(String uploaderNodeId, String requestedTransferId,
+                                                               String requesterNodeId, String rootId,
+                                                               String relativePath, long size, String sha256,
+                                                               boolean overwrite, String operation,
+                                                               String ticketId, String requestId,
+                                                               String destinationApprovalId) throws Exception {
+        if (sessionCommitter == null) throw new IllegalStateException("Coordinated transfers are not configured on this node.");
+        requireUploader(uploaderNodeId);
+        String requester = requireIdentity(requesterNodeId, "Coordinating member identity");
+        String id = normalizeTransferId(requestedTransferId);
+        String root = requireIdentity(rootId, "Eligible root ID");
+        String path = normalizePath(relativePath);
+        String digest = normalizeHash(sha256);
+        String op = normalizeOperation(operation);
+        String ticket = normalizeTransferId(ticketId);
+        String request = normalizeTransferId(requestId);
+        if (size < 0 || size > maxFileBytes) throw new IllegalArgumentException("Transfer size exceeds this node's limit.");
+        cleanupExpired();
+        Path requestedDirectory = sessionDirectory(id);
+        if (Files.exists(requestedDirectory, LinkOption.NOFOLLOW_LINKS)) {
+            if (Files.isSymbolicLink(requestedDirectory) || !Files.isDirectory(requestedDirectory, LinkOption.NOFOLLOW_LINKS)) {
+                throw new SecurityException("Transfer identifier is occupied by an unsafe filesystem entry.");
+            }
+            Path existingJournal = requestedDirectory.resolve("session.properties");
+            verifyRegular(existingJournal, "transfer journal");
+            Properties existing = new Properties();
+            try (InputStream input = Files.newInputStream(existingJournal, LinkOption.NOFOLLOW_LINKS)) { existing.load(input); }
+            if (!"filesystem".equals(existing.getProperty("kind"))
+                    || !uploaderNodeId.equals(existing.getProperty("uploader"))
+                    || !requester.equals(existing.getProperty("requester"))
+                    || !root.equals(existing.getProperty("rootId"))
+                    || !path.equals(existing.getProperty("path"))
+                    || size != number(existing, "size")
+                    || !digest.equals(existing.getProperty("sha256"))
+                    || overwrite != Boolean.parseBoolean(existing.getProperty("overwrite"))
+                    || !op.equals(existing.getProperty("operation"))
+                    || !ticket.equals(existing.getProperty("ticketId"))
+                    || !request.equals(existing.getProperty("requestId"))
+                    || !(destinationApprovalId == null ? "" : destinationApprovalId)
+                            .equals(existing.getProperty("destinationApprovalId", ""))) {
+                throw new SecurityException("Transfer identifier already belongs to a different session.");
+            }
+            return statusFor(id, existing);
+        }
+        List<Path> active = sessionDirectories();
+        long activeCount = 0;
+        long reserved = 0;
+        for (Path existingDir : active) {
+            Path journal = existingDir.resolve("session.properties");
+            if (!Files.isRegularFile(journal, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(journal)) continue;
+            Properties existing = new Properties();
+            try (InputStream input = Files.newInputStream(journal, LinkOption.NOFOLLOW_LINKS)) { existing.load(input); }
+            if (!"COMMITTED".equals(existing.getProperty("state"))) {
+                activeCount++;
+                reserved = Math.addExact(reserved, number(existing, "size"));
+            }
+        }
+        if (activeCount >= MAX_SESSIONS) throw new IllegalStateException("This node has reached its active transfer-session limit.");
+        long reservationLimit = maxFileBytes > Long.MAX_VALUE / 2 ? Long.MAX_VALUE : maxFileBytes * 2;
+        if (size > reservationLimit - Math.min(reserved, reservationLimit)) {
+            throw new IllegalStateException("Active transfer sessions exceed the receiver's reserved staging budget.");
+        }
+        if (size > Files.getFileStore(this.root).getUsableSpace()) {
+            throw new IllegalStateException("Not enough free space in the transfer staging volume.");
+        }
+        Path dir = sessionDirectory(id);
+        Files.createDirectory(dir);
+        restrictDirectory(dir);
+        Properties p = new Properties();
+        p.setProperty("kind", "filesystem");
+        p.setProperty("uploader", uploaderNodeId);
+        p.setProperty("requester", requester);
+        p.setProperty("rootId", root);
+        p.setProperty("path", path);
+        p.setProperty("size", Long.toString(size));
+        p.setProperty("sha256", digest);
+        p.setProperty("overwrite", Boolean.toString(overwrite));
+        p.setProperty("operation", op);
+        p.setProperty("ticketId", ticket);
+        p.setProperty("requestId", request);
+        p.setProperty("destinationApprovalId", destinationApprovalId == null ? "" : destinationApprovalId);
         p.setProperty("chunkBytes", Integer.toString(chunkBytes));
         p.setProperty("createdAt", Long.toString(System.currentTimeMillis()));
         p.setProperty("state", "RECEIVING");
@@ -238,14 +352,20 @@ public final class ResumableTransferManager {
         }
         Map<String, Object> committed;
         try (InputStream input = new ChunkSequenceInputStream(dir, count)) {
-            committed = committer.commit(id, uploaderNodeId, p.getProperty("path"), input, size, actual);
+            if ("filesystem".equals(p.getProperty("kind"))) {
+                if (sessionCommitter == null) throw new IllegalStateException("Coordinated transfers are not configured on this node.");
+                committed = sessionCommitter.commit(id, uploaderNodeId, p.getProperty("path"), input, size, actual,
+                        sessionMetadata(p));
+            } else {
+                committed = committer.commit(id, uploaderNodeId, p.getProperty("path"), input, size, actual);
+            }
         }
         // Persist the publication receipt before releasing staged chunks. If the process dies
         // after the managed file is published but before the sender saves its receipt, the next
         // status/create/commit call can recover the exact same result without retransferring bytes.
         p.setProperty("state", "COMMITTED");
         p.setProperty("committedAt", Long.toString(System.currentTimeMillis()));
-        for (String key : List.of("fileId", "path", "size", "sha256")) {
+        for (String key : List.of("fileId", "rootId", "path", "size", "sha256")) {
             Object value = committed.get(key);
             if (value != null && (value instanceof String || value instanceof Number)) {
                 p.setProperty("receipt." + key, String.valueOf(value));
@@ -282,6 +402,9 @@ public final class ResumableTransferManager {
         int count = chunkCount(size);
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("transferId", id);
+        result.put("kind", p.getProperty("kind", "managed"));
+        if (p.getProperty("rootId") != null) result.put("rootId", p.getProperty("rootId"));
+        if (p.getProperty("operation") != null) result.put("operation", p.getProperty("operation"));
         result.put("path", p.getProperty("path"));
         result.put("size", size);
         result.put("sha256", p.getProperty("sha256"));
@@ -320,10 +443,24 @@ public final class ResumableTransferManager {
     private static Map<String, Object> receiptMap(Properties p) {
         Map<String, Object> receipt = new LinkedHashMap<>();
         receipt.put("fileId", p.getProperty("receipt.fileId", ""));
+        if (p.getProperty("receipt.rootId") != null) receipt.put("rootId", p.getProperty("receipt.rootId", ""));
         receipt.put("path", p.getProperty("receipt.path", p.getProperty("path", "")));
         receipt.put("size", parseReceiptLong(p.getProperty("receipt.size"), number(p, "size")));
         receipt.put("sha256", p.getProperty("receipt.sha256", p.getProperty("sha256", "")));
         return receipt;
+    }
+
+    private static Map<String, String> sessionMetadata(Properties p) {
+        Map<String, String> metadata = new LinkedHashMap<>();
+        for (String key : p.stringPropertyNames()) {
+            if (key.startsWith("coordinated.")) metadata.put(key.substring("coordinated.".length()), p.getProperty(key));
+        }
+        for (String key : List.of("rootId", "path", "operation", "overwrite", "ticketId", "requestId",
+                "requester", "destinationApprovalId")) {
+            String value = p.getProperty(key);
+            if (value != null) metadata.put(key, value);
+        }
+        return metadata;
     }
 
     private static long parseReceiptLong(String value, long fallback) {
@@ -439,6 +576,22 @@ public final class ResumableTransferManager {
         } catch (IllegalArgumentException invalid) {
             throw new IllegalArgumentException("Transfer identifier must be a canonical UUID.", invalid);
         }
+    }
+
+    private static String requireIdentity(String value, String label) {
+        if (value == null || value.isBlank() || value.length() > 256) {
+            throw new IllegalArgumentException(label + " is required.");
+        }
+        return value;
+    }
+
+    private static String normalizeOperation(String operation) {
+        if (operation == null) throw new IllegalArgumentException("A coordinated transfer operation is required.");
+        String normalized = operation.toUpperCase(Locale.ROOT);
+        if (!normalized.equals("COPY") && !normalized.equals("MOVE")) {
+            throw new IllegalArgumentException("Coordinated transfer operation must be COPY or MOVE.");
+        }
+        return normalized;
     }
 
     private static long number(Properties p, String key) {

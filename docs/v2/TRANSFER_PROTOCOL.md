@@ -40,3 +40,62 @@ The sender must persist a UUID, destination member, normalized destination path,
 After commit, the receiver stores a seven-day metadata-only tombstone containing the committed receipt. `GET` status, replayed `POST` create, and replayed `POST` commit return the durable receipt. `DELETE` cannot change a committed session to aborted. The tombstone is separate from staged chunk storage and is excluded from active-session and reserved-byte quotas. This protects against process death or lost HTTP responses on either side of publication.
 
 The desktop queue is exposed through the local control CLI (`managed transfers`, `managed transfer-status`, `managed resume`, and `managed abort`). The Android foreground peer service owns an encrypted persistent queue, reopens SAF documents through persisted read grants, retries eligible jobs on a bounded schedule, and exposes queue, resume, and abort actions in the Android app. Android jobs preserve only the content URI and digest metadata, never a duplicate local copy of source bytes.
+
+## Three-peer coordinated transfers
+
+A coordinator Z can initiate a COPY or MOVE from source X to destination Y without handling file bytes. The data path remains X → Y. Z exchanges signed metadata and status only; it never opens the source file, creates a receiver session, stages chunks or receives content.
+
+### Ticket
+
+Z signs a canonical ticket with its active membership Ed25519 key. The ticket binds:
+
+- ticket, request and transfer UUIDs;
+- issuer, source and destination node IDs;
+- source and destination eligible-root IDs and normalized relative paths;
+- operation (`COPY` or `MOVE`), overwrite intent;
+- source size, full-file SHA-256 and source version;
+- optional source and destination approval IDs;
+- issue time and expiry.
+
+Tickets are metadata-only. The canonical JSON field order is stable, so the signature covers every bound value. X and Y verify the signature against the issuer's current active membership key and independently enforce membership, role and expiry checks. The default lifetime is 600 seconds and the maximum is 3600 seconds; tickets issued more than 120 seconds in the future or outside their lifetime are rejected.
+
+Each receiving role durably claims a ticket ID against one transfer identity and request identity. Replaying the same ticket with the same transfer identity is idempotent and resumes or returns the existing result. Reusing the ticket ID with a different transfer identity, request identity or signed body is rejected.
+
+### Endpoints
+
+- `GET /network/coordinated/metadata?role=source|destination&rootId=...&path=...` returns metadata only. The source role reports type, size, digest and version; the destination role reports existence, type and overwrite requirements. PRIVATE paths are hidden and PROTECTED paths report that approval is required.
+- `POST /network/coordinated/transfers` on X accepts `{ticket, ticketSignature}`. The authenticated requester must be the ticket issuer, the ticket must be bound to X, and the destination must be an active member. X authorizes its own source resource, claims the ticket for the source role, creates the destination receiver session, and streams chunks directly to Y.
+- `POST /network/transfers` on Y with `kind: "coordinated"` accepts `{transferId, ticket, ticketSignature}`. Y verifies the ticket, requires the uploader to be the ticket source and Y to be the ticket destination, claims the ticket for the destination role, authorizes the write, and creates a normal resumable receiver session.
+- `GET /network/coordinated/transfers/{requestId}` on X returns the source job's metadata-only state and, while non-terminal, destination progress. The authenticated requester must be the ticket issuer.
+
+Chunk upload, status, commit and abort continue to use the standard resumable transfer endpoints between X and Y. The destination session is bound to the source device as uploader, so the coordinator cannot upload chunks even if it learns the transfer ID.
+
+### Execution and MOVE ordering
+
+The source job is durable and keyed by the ticket request UUID. States are `TRANSFERRING`, `COPIED`, `DELETING`, `MOVED`, `COPIED_NOT_MOVED`, `RETRYABLE` and `FAILED`.
+
+For a MOVE, X performs this order:
+
+1. Verify the ticket, membership, destination activity and source policy/approval.
+2. Revalidate the source size, digest and version at authorization time.
+3. Create the destination session and transfer chunks directly to Y.
+4. Receive the destination's verified commit receipt.
+5. Revalidate that the source is unchanged since the ticket was issued.
+6. Persist `DELETING` with the verified receipt.
+7. Delete the source only after destination commit and source revalidation.
+8. Report `MOVED`. If deletion fails, report `COPIED_NOT_MOVED` and keep the destination receipt.
+
+A retry of a `DELETING` or `COPIED_NOT_MOVED` job retries the idempotent source deletion and reconciles the terminal state. A crash before deletion therefore cannot lose the only copy, and a crash after deletion converges to `MOVED` without retransferring bytes.
+
+COPY uses a source `READ` decision. MOVE uses a source `MOVE` decision. Destination creation uses `CREATE`, and overwriting an existing destination uses `WRITE`. Protected operations require an owner approval obtained independently at the owning device; the approval ID is carried in the signed ticket and bound to the ticket ID. Revoked source, destination or coordinator members are rejected.
+
+### Coordinator state
+
+The coordinator persists one durable request record per coordination request, including the signed ticket, state and metadata-only result. `retry` re-invokes the same ticket; terminal results are returned unchanged. The coordinator status view exposes the source job state, destination progress when available and the committed receipt, never file content.
+
+### Limits and caveats
+
+- Coordinated transfers are exposed through the desktop local-control socket and CLI (`coordinated plan`, `prepare`, `transfer`, `status`, `retry`, `list`). Android UI integration is not yet implemented.
+- Protection approvals remain process-local; a restart fails closed and requires fresh approvals.
+- Coordination assumes the source and destination are directly reachable from each other. No relay or coordinator-assisted fallback is introduced.
+- Ticket claims, source jobs and coordinator requests are node-local durable state; clock skew beyond 120 seconds between devices fails closed.

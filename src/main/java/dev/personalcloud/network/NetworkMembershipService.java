@@ -567,6 +567,32 @@ public final class NetworkMembershipService {
                 "endpoint", row.getOrDefault("endpoint", ""), "status", row.getOrDefault("status", "ACTIVE"));
     }
 
+    /** Returns the advertised direct endpoint for an active member, or fails closed. */
+    public synchronized String activeMemberEndpoint(String nodeId) {
+        Map<String, String> row = store.getRecord("member", nodeId);
+        if (row == null || !"ACTIVE".equals(row.getOrDefault("status", "ACTIVE"))) {
+            throw new SecurityException("The requested device is not an active network member.");
+        }
+        String endpoint = row.getOrDefault("endpoint", "");
+        if (endpoint.isBlank()) {
+            throw new IllegalStateException("The requested device has no advertised direct endpoint yet.");
+        }
+        return endpoint;
+    }
+
+    /** Returns the verified Ed25519 public key for an active member. */
+    public synchronized java.security.PublicKey activeMemberPublicKey(String nodeId) throws Exception {
+        Map<String, String> row = store.getRecord("member", nodeId);
+        if (row == null || !"ACTIVE".equals(row.getOrDefault("status", "ACTIVE"))) {
+            throw new SecurityException("The requested device is not an active network member.");
+        }
+        MembershipCertificate.CertificateInfo info = MembershipCertificate.verify(row.get("certificate"));
+        if (!nodeId.equals(info.nodeId())) {
+            throw new SecurityException("The member certificate does not match the requested device.");
+        }
+        return info.publicKey();
+    }
+
     public synchronized void revokeMember(String nodeId) throws Exception {
         Map<String, String> network = requireNetwork();
         if (nodeId.equals(config.nodeId())) throw new IllegalArgumentException("A device cannot revoke its own membership from itself.");

@@ -30,6 +30,17 @@ Any active member must be able to initiate an operation between any two devices.
 - Coordinator relay: rejected; violates ADR-0001.
 - Blind copy-then-delete: rejected; risks data loss.
 
+## Implementation note (2026-11-08)
+
+M2.1 realizes coordination as a ticket-authorized source push rather than the destination-pull model recommended above:
+
+- Z fetches source metadata from X, signs a short-lived ticket, and sends the ticket to X. Z never opens the source file or creates a receiver session.
+- X independently verifies the ticket against Z's active membership key, requires the ticket to be bound to X and the destination to be an active member, authorizes its own source resource, creates the destination session, and streams chunks directly to Y.
+- Y independently verifies the same ticket, requires the authenticated uploader to be the ticket source and the receiver to be the ticket destination, then authorizes its own write.
+- X deletes the source only after Y confirms a verified commit and X revalidates that the source is unchanged.
+
+This preserves the ADR's core invariants: Z never receives or relays bytes, both endpoints authorize independently, and a MOVE cannot lose the only copy. The outbound-connection concern from the alternatives section is bounded because X connects only to an active member's advertised endpoint after verifying a signed ticket issued by an active member, and the ticket names the exact source and destination paths. Destination pull remains an alternative if stronger destination-initiated connection control is required later.
+
 ## References
 
 - `docs/PRODUCT_SPEC.md` §5

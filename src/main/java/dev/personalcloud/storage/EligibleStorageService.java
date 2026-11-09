@@ -173,6 +173,29 @@ public final class EligibleStorageService {
     public Map<String, Object> write(String memberId, String rootId, String relativePath, InputStream content,
                                      long declaredSize, String declaredSha256, boolean overwrite,
                                      String approvalId) throws Exception {
+        return writeInternal(memberId, rootId, relativePath, content, declaredSize, declaredSha256,
+                overwrite, approvalId, false);
+    }
+
+    /**
+     * Publishes a coordinated destination after the destination has already
+     * authorized the ticket. The authorization record is durable, so a retry
+     * after a crash or lost response is idempotent and does not consume a new
+     * owner approval.
+     */
+    public Map<String, Object> writeCoordinated(String requesterId, String rootId, String relativePath,
+                                                InputStream content, long declaredSize, String declaredSha256,
+                                                boolean overwrite, String approvalId, String ticketId) throws Exception {
+        authorizeCoordinatedWrite(requesterId, rootId, relativePath, overwrite,
+                approvalId, ticketId, declaredSize, declaredSha256);
+        return writeInternal(requesterId, rootId, relativePath, content, declaredSize, declaredSha256,
+                overwrite, "", true);
+    }
+
+    private Map<String, Object> writeInternal(String memberId, String rootId, String relativePath,
+                                              InputStream content, long declaredSize, String declaredSha256,
+                                              boolean overwrite, String approvalId,
+                                              boolean coordinated) throws Exception {
         requireConsent();
         EligibleRoot root = root(rootId);
         String path = normalizeRelative(relativePath);
@@ -187,11 +210,20 @@ public final class EligibleStorageService {
             if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) {
                 throw new IllegalArgumentException("The destination is not a regular file.");
             }
+            if (coordinated && declaredSha256 != null && !declaredSha256.isBlank()
+                    && Files.size(target) == declaredSize
+                    && digest(target).equalsIgnoreCase(declaredSha256)) {
+                BasicFileAttributes existing = Files.readAttributes(target, BasicFileAttributes.class,
+                        LinkOption.NOFOLLOW_LINKS);
+                Map<String, Object> result = entry(root, path, target.getFileName().toString(), existing);
+                result.put("sha256", declaredSha256.toLowerCase(java.util.Locale.ROOT));
+                return result;
+            }
             if (!overwrite) throw new IllegalStateException("The destination already exists; overwrite was not authorized.");
-            authorize(memberId, root, path, PolicyOperation.WRITE, approvalId);
+            if (!coordinated) authorize(memberId, root, path, PolicyOperation.WRITE, approvalId);
             before = Files.readAttributes(target, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
         } else {
-            authorize(memberId, root, path, PolicyOperation.CREATE, approvalId);
+            if (!coordinated) authorize(memberId, root, path, PolicyOperation.CREATE, approvalId);
         }
 
         Path parent = target.getParent();
@@ -400,6 +432,300 @@ public final class EligibleStorageService {
             throw new SecurityException("The approval belongs to a different member.");
         }
         return approval;
+    }
+
+    /** Source metadata for a coordinated ticket: size, SHA-256 and an opaque version binding. */
+    public Map<String, Object> transferMetadata(String memberId, String rootId, String relativePath) throws Exception {
+        requireConsent();
+        EligibleRoot root = root(rootId);
+        String path = normalizeRelative(relativePath);
+        authorize(memberId, root, path, PolicyOperation.READ, null);
+        Path target = resolve(root, path, true).toRealPath();
+        requireWithinRoot(root, target);
+        if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IllegalArgumentException("The requested path is not a regular file.");
+        }
+        return sourceMetadata(root, path, target);
+    }
+
+    /** Destination existence, operation and approval requirement for planning a coordinated transfer. */
+    public Map<String, Object> destinationMetadata(String memberId, String rootId, String relativePath) throws Exception {
+        requireConsent();
+        EligibleRoot root = root(rootId);
+        String path = normalizeRelative(relativePath);
+        if (path.isEmpty()) throw new IllegalArgumentException("A destination file path is required.");
+        Path target = resolve(root, path, false);
+        boolean exists = Files.exists(target, LinkOption.NOFOLLOW_LINKS);
+        PolicyOperation operation = exists ? PolicyOperation.WRITE : PolicyOperation.CREATE;
+        PolicyDecision decision = policy.evaluate(root.id(), path, operation);
+        if (decision == PolicyDecision.DENY) {
+            throw new SecurityException("This resource is private and cannot be accessed remotely.");
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("rootId", root.id());
+        result.put("path", path);
+        result.put("exists", exists);
+        result.put("operation", operation.name());
+        result.put("approvalRequired", decision == PolicyDecision.REQUIRE_APPROVAL);
+        if (exists) {
+            if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) {
+                throw new IllegalArgumentException("The destination is not a regular file.");
+            }
+            BasicFileAttributes attributes = Files.readAttributes(target, BasicFileAttributes.class,
+                    LinkOption.NOFOLLOW_LINKS);
+            result.put("size", attributes.size());
+            result.put("sha256", digest(target));
+            result.put("modified", attributes.lastModifiedTime().toInstant().toString());
+        }
+        return result;
+    }
+
+    public record CoordinatedSource(Path path, Map<String, Object> metadata) { }
+
+    /**
+     * Verifies that the ticket's source binding still matches the owner's file
+     * and durably records the source authorization. A retry with the same
+     * ticket reuses the record instead of consuming another owner approval.
+     */
+    public CoordinatedSource authorizeCoordinatedSource(String requesterId, String rootId, String relativePath,
+                                                        String operation, String approvalId, String ticketId,
+                                                        long expectedSize, String expectedSha256,
+                                                        String expectedVersion) throws Exception {
+        requireConsent();
+        EligibleRoot root = root(rootId);
+        String path = normalizeRelative(relativePath);
+        if (path.isEmpty()) throw new IllegalArgumentException("A source file path is required.");
+        String normalizedOperation = operation == null ? "" : operation.toUpperCase(java.util.Locale.ROOT);
+        if (!normalizedOperation.equals("COPY") && !normalizedOperation.equals("MOVE")) {
+            throw new IllegalArgumentException("Coordinated source operation must be COPY or MOVE.");
+        }
+        PolicyOperation policyOperation = normalizedOperation.equals("MOVE")
+                ? PolicyOperation.MOVE : PolicyOperation.READ;
+        Path target = resolve(root, path, true).toRealPath();
+        requireWithinRoot(root, target);
+        if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IllegalArgumentException("The coordinated source is not a regular file.");
+        }
+        Map<String, Object> metadata = sourceMetadata(root, path, target);
+        verifyMetadata(metadata, expectedSize, expectedSha256, expectedVersion);
+        String recordId = requireText(ticketId, "Ticket ID") + "-source";
+        Map<String, String> existing = state.getRecord(COORDINATED_AUTHORIZATION, recordId);
+        if (existing != null) {
+            verifyAuthorizationRecord(existing, requesterId, root.id(), path, policyOperation);
+            return new CoordinatedSource(target, metadata);
+        }
+        PolicyDecision decision = decide(requesterId, root, path, policyOperation);
+        if (decision == PolicyDecision.REQUIRE_APPROVAL) {
+            if (isBlank(approvalId)) throw new ApprovalRequiredException(root.id(), path, policyOperation);
+            if (!approvals.consume(approvalId, requesterId, root.id(), path, policyOperation)) {
+                throw new SecurityException("The supplied owner approval is invalid, expired, already used, or bound to a different operation.");
+            }
+        }
+        persistAuthorization(recordId, "SOURCE", requesterId, root.id(), path, policyOperation,
+                false, expectedSize, expectedSha256, expectedVersion);
+        return new CoordinatedSource(target, metadata);
+    }
+
+    /** Revalidates the source binding immediately before any source deletion. */
+    public Map<String, Object> verifyCoordinatedSourceUnchanged(String requesterId, String rootId,
+                                                                String relativePath, String operation,
+                                                                String ticketId, long expectedSize,
+                                                                String expectedSha256, String expectedVersion) throws Exception {
+        requireConsent();
+        EligibleRoot root = root(rootId);
+        String path = normalizeRelative(relativePath);
+        String normalizedOperation = operation == null ? "" : operation.toUpperCase(java.util.Locale.ROOT);
+        PolicyOperation policyOperation = normalizedOperation.equals("MOVE")
+                ? PolicyOperation.MOVE : PolicyOperation.READ;
+        Map<String, String> authorization = state.getRecord(COORDINATED_AUTHORIZATION,
+                requireText(ticketId, "Ticket ID") + "-source");
+        if (authorization == null) throw new SecurityException("No durable source authorization exists for this ticket.");
+        verifyAuthorizationRecord(authorization, requesterId, root.id(), path, policyOperation);
+        if (policy.evaluate(root.id(), path, policyOperation) == PolicyDecision.DENY) {
+            throw new SecurityException("This resource is private and cannot be accessed remotely.");
+        }
+        Path target = resolve(root, path, true).toRealPath();
+        requireWithinRoot(root, target);
+        if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) {
+            throw new SecurityException("The coordinated source is no longer a regular file.");
+        }
+        Map<String, Object> metadata = sourceMetadata(root, path, target);
+        verifyMetadata(metadata, expectedSize, expectedSha256, expectedVersion);
+        return metadata;
+    }
+
+    /**
+     * Deletes a coordinated MOVE source only after the destination committed
+     * and the source was revalidated. The durable source authorization covers
+     * the move; no second destructive approval is consumed.
+     */
+    public Map<String, Object> deleteCoordinatedSource(String requesterId, String rootId, String relativePath,
+                                                       String ticketId, long expectedSize,
+                                                       String expectedSha256, String expectedVersion) throws Exception {
+        requireConsent();
+        EligibleRoot root = root(rootId);
+        String path = normalizeRelative(relativePath);
+        Map<String, String> authorization = state.getRecord(COORDINATED_AUTHORIZATION,
+                requireText(ticketId, "Ticket ID") + "-source");
+        if (authorization == null) throw new SecurityException("No durable source authorization exists for this ticket.");
+        verifyAuthorizationRecord(authorization, requesterId, root.id(), path, PolicyOperation.MOVE);
+        Path target = resolve(root, path, false);
+        if (!Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
+            return Map.of("deleted", false, "alreadyAbsent", true, "rootId", root.id(), "path", path);
+        }
+        target = target.toRealPath();
+        requireWithinRoot(root, target);
+        if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) {
+            throw new SecurityException("The coordinated source is no longer a regular file.");
+        }
+        if (policy.evaluate(root.id(), path, PolicyOperation.MOVE) == PolicyDecision.DENY) {
+            throw new SecurityException("This resource is private and cannot be accessed remotely.");
+        }
+        Map<String, Object> metadata = sourceMetadata(root, path, target);
+        verifyMetadata(metadata, expectedSize, expectedSha256, expectedVersion);
+        Files.delete(target);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("deleted", true);
+        result.put("rootId", root.id());
+        result.put("path", path);
+        result.put("size", expectedSize);
+        result.put("sha256", String.valueOf(metadata.get("sha256")));
+        return result;
+    }
+
+    /**
+     * Authorizes a coordinated destination write and durably records it. The
+     * approval is bound to the coordinating member, not the source uploader.
+     */
+    public Map<String, Object> authorizeCoordinatedWrite(String requesterId, String rootId, String relativePath,
+                                                         boolean overwrite, String approvalId, String ticketId,
+                                                         long expectedSize, String expectedSha256) throws Exception {
+        requireConsent();
+        EligibleRoot root = root(rootId);
+        String path = normalizeRelative(relativePath);
+        if (path.isEmpty()) throw new IllegalArgumentException("A destination file path is required.");
+        if (expectedSize < 0 || expectedSize > config.maxFileBytes()) {
+            throw new IllegalArgumentException("The declared file size is outside the permitted limit.");
+        }
+        Path target = resolve(root, path, false);
+        boolean exists = Files.exists(target, LinkOption.NOFOLLOW_LINKS);
+        if (exists && !Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IllegalArgumentException("The destination is not a regular file.");
+        }
+        boolean identical = exists && expectedSha256 != null && !expectedSha256.isBlank()
+                && Files.size(target) == expectedSize
+                && digest(target).equalsIgnoreCase(expectedSha256);
+        if (exists && !overwrite && !identical) {
+            throw new IllegalStateException("The destination already exists; overwrite was not authorized.");
+        }
+        PolicyOperation operation = exists ? PolicyOperation.WRITE : PolicyOperation.CREATE;
+        String recordId = requireText(ticketId, "Ticket ID") + "-destination";
+        Map<String, String> existing = state.getRecord(COORDINATED_AUTHORIZATION, recordId);
+        if (existing != null) {
+            boolean sameBinding = requesterId.equals(existing.get("memberId"))
+                    && root.id().equals(existing.get("rootId"))
+                    && path.equals(existing.get("path"));
+            // A retry after a successful commit may observe the newly created
+            // destination as an existing file. Accept it only when its bytes
+            // exactly match the ticket, so re-authorization stays idempotent.
+            boolean sameOperation = operation.name().equals(existing.get("operation"));
+            if (!sameBinding || (!sameOperation && !identical)) {
+                throw new SecurityException("The coordinated authorization is bound to a different member, resource or operation.");
+            }
+            return Map.of("rootId", root.id(), "path", path, "operation", operation.name(),
+                    "overwrite", overwrite, "authorized", true);
+        }
+        PolicyDecision decision = decide(requesterId, root, path, operation);
+        if (decision == PolicyDecision.REQUIRE_APPROVAL) {
+            if (isBlank(approvalId)) throw new ApprovalRequiredException(root.id(), path, operation);
+            if (!approvals.consume(approvalId, requesterId, root.id(), path, operation)) {
+                throw new SecurityException("The supplied owner approval is invalid, expired, already used, or bound to a different operation.");
+            }
+        }
+        persistAuthorization(recordId, "DESTINATION", requesterId, root.id(), path, operation,
+                overwrite, expectedSize, expectedSha256, "");
+        return Map.of("rootId", root.id(), "path", path, "operation", operation.name(),
+                "overwrite", overwrite, "authorized", true);
+    }
+
+    private static final String COORDINATED_AUTHORIZATION = "coordinatedAuthorization";
+
+    private void persistAuthorization(String recordId, String role, String memberId, String rootId, String path,
+                                      PolicyOperation operation, boolean overwrite, long size, String sha256,
+                                      String version) throws Exception {
+        Map<String, String> row = new LinkedHashMap<>();
+        row.put("role", role);
+        row.put("memberId", memberId);
+        row.put("rootId", rootId);
+        row.put("path", path);
+        row.put("operation", operation.name());
+        row.put("overwrite", Boolean.toString(overwrite));
+        row.put("size", Long.toString(size));
+        row.put("sha256", sha256 == null ? "" : sha256.toLowerCase(java.util.Locale.ROOT));
+        row.put("version", version == null ? "" : version);
+        row.put("authorizedAt", Instant.now().toString());
+        state.putRecord(COORDINATED_AUTHORIZATION, recordId, row);
+    }
+
+    private static void verifyAuthorizationRecord(Map<String, String> row, String memberId, String rootId,
+                                                  String path, PolicyOperation operation) {
+        boolean matches = memberId.equals(row.get("memberId"))
+                && rootId.equals(row.get("rootId"))
+                && path.equals(row.get("path"))
+                && operation.name().equals(row.get("operation"));
+        if (!matches) {
+            throw new SecurityException("The coordinated authorization is bound to a different member, resource or operation.");
+        }
+    }
+
+    private static void verifyMetadata(Map<String, Object> metadata, long expectedSize, String expectedSha256,
+                                       String expectedVersion) {
+        long actualSize = ((Number) metadata.get("size")).longValue();
+        String actualSha = String.valueOf(metadata.get("sha256"));
+        String actualVersion = String.valueOf(metadata.get("version"));
+        boolean matches = actualSize == expectedSize
+                && expectedSha256 != null && actualSha.equalsIgnoreCase(expectedSha256)
+                && expectedVersion != null && actualVersion.equals(expectedVersion);
+        if (!matches) {
+            throw new SecurityException("The coordinated source changed after its ticket was issued.");
+        }
+    }
+
+    private Map<String, Object> sourceMetadata(EligibleRoot root, String path, Path target) throws Exception {
+        BasicFileAttributes attributes = Files.readAttributes(target, BasicFileAttributes.class,
+                LinkOption.NOFOLLOW_LINKS);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("rootId", root.id());
+        result.put("path", path);
+        result.put("name", target.getFileName().toString());
+        result.put("kind", "FILE");
+        result.put("size", attributes.size());
+        result.put("modified", attributes.lastModifiedTime().toInstant().toString());
+        result.put("sha256", digest(target));
+        result.put("version", version(attributes));
+        return result;
+    }
+
+    private static String version(BasicFileAttributes attributes) throws Exception {
+        String binding = attributes.size() + "|" + attributes.lastModifiedTime().toMillis()
+                + "|" + String.valueOf(attributes.fileKey());
+        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                .digest(binding.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private static String digest(Path path) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        try (InputStream input = Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS)) {
+            byte[] buffer = new byte[128 * 1024];
+            int read;
+            while ((read = input.read(buffer)) != -1) digest.update(buffer, 0, read);
+        }
+        return HexFormat.of().formatHex(digest.digest());
+    }
+
+    private static String requireText(String value, String label) {
+        if (value == null || value.isBlank()) throw new IllegalArgumentException(label + " is required.");
+        return value;
     }
 
     private void authorize(String memberId, EligibleRoot root, String path, PolicyOperation operation,

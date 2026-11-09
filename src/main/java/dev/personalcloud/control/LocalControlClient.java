@@ -646,6 +646,74 @@ public final class LocalControlClient {
                 "approvalId", approvalId == null ? "" : approvalId));
     }
 
+    public Map<String, Object> planCoordinatedTransfer(String sourceNodeId, String sourceRootId, String sourcePath,
+                                                        String destinationNodeId, String destinationRootId,
+                                                        String destinationPath) throws IOException {
+        return request("coordinated.plan", fields(
+                "sourceNodeId", requireText(sourceNodeId, "Source node ID"),
+                "sourceRootId", requireText(sourceRootId, "Source root ID"),
+                "sourcePath", sourcePath == null ? "" : sourcePath,
+                "destinationNodeId", requireText(destinationNodeId, "Destination node ID"),
+                "destinationRootId", requireText(destinationRootId, "Destination root ID"),
+                "destinationPath", requireText(destinationPath, "Destination path")));
+    }
+
+    public Map<String, Object> prepareCoordinatedTransfer(String sourceNodeId, String sourceRootId,
+                                                           String sourcePath, String destinationNodeId,
+                                                           String destinationRootId, String destinationPath,
+                                                           String operation, boolean overwrite,
+                                                           String sourceApprovalId, String destinationApprovalId,
+                                                           long ttlSeconds) throws IOException {
+        return request("coordinated.prepare", fields(
+                "sourceNodeId", requireText(sourceNodeId, "Source node ID"),
+                "sourceRootId", requireText(sourceRootId, "Source root ID"),
+                "sourcePath", sourcePath == null ? "" : sourcePath,
+                "destinationNodeId", requireText(destinationNodeId, "Destination node ID"),
+                "destinationRootId", requireText(destinationRootId, "Destination root ID"),
+                "destinationPath", requireText(destinationPath, "Destination path"),
+                "operation", requireText(operation, "Operation"),
+                "overwrite", overwrite,
+                "sourceApprovalId", sourceApprovalId == null ? "" : sourceApprovalId,
+                "destinationApprovalId", destinationApprovalId == null ? "" : destinationApprovalId,
+                "ttlSeconds", ttlSeconds));
+    }
+
+    public Map<String, Object> coordinateTransfer(String sourceNodeId, String sourceRootId, String sourcePath,
+                                                   String destinationNodeId, String destinationRootId,
+                                                   String destinationPath, String operation, boolean overwrite,
+                                                   String sourceApprovalId, String destinationApprovalId,
+                                                   long ttlSeconds) throws IOException {
+        return request("coordinated.transfer", fields(
+                "sourceNodeId", requireText(sourceNodeId, "Source node ID"),
+                "sourceRootId", requireText(sourceRootId, "Source root ID"),
+                "sourcePath", sourcePath == null ? "" : sourcePath,
+                "destinationNodeId", requireText(destinationNodeId, "Destination node ID"),
+                "destinationRootId", requireText(destinationRootId, "Destination root ID"),
+                "destinationPath", requireText(destinationPath, "Destination path"),
+                "operation", requireText(operation, "Operation"),
+                "overwrite", overwrite,
+                "sourceApprovalId", sourceApprovalId == null ? "" : sourceApprovalId,
+                "destinationApprovalId", destinationApprovalId == null ? "" : destinationApprovalId,
+                "ttlSeconds", ttlSeconds));
+    }
+
+    public Map<String, Object> coordinatedTransferStatus(String requestId) throws IOException {
+        return request("coordinated.status", fields("requestId", requireText(requestId, "Request ID")));
+    }
+
+    public Map<String, Object> retryCoordinatedTransfer(String requestId) throws IOException {
+        return request("coordinated.retry", fields("requestId", requireText(requestId, "Request ID")));
+    }
+
+    @SuppressWarnings("unchecked")
+    public List<Map<String, Object>> listCoordinatedTransfers() throws IOException {
+        Object rows = request("coordinated.list").get("requests");
+        if (!(rows instanceof List<?> list)) throw new IOException("The control server returned an invalid coordinated transfer list.");
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Object item : list) if (item instanceof Map<?, ?> map) result.add((Map<String, Object>) map);
+        return List.copyOf(result);
+    }
+
     /** Downloads atomically to a new destination and verifies the source size/mtime did not change. */
     public DownloadResult download(String referenceId, String relativePath, Path destination) throws Exception {
         Path requested = destination.toAbsolutePath().normalize();

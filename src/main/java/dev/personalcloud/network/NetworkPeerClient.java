@@ -317,9 +317,54 @@ public final class NetworkPeerClient {
         return getJson(baseUrl, "/network/transfers/" + encode(transferId), membership);
     }
 
+    /** Fetches source or destination metadata for a coordinated transfer plan. */
+    public Map<String,Object> coordinatedMetadata(String baseUrl, String role, String rootId, String relativePath,
+                                                  NetworkMembershipService membership) throws Exception {
+        String path = "/network/coordinated/metadata?role=" + encode(role)
+                + "&rootId=" + encode(rootId) + "&path=" + encode(relativePath == null ? "" : relativePath);
+        return getJson(baseUrl, path, membership);
+    }
+
+    /** Creates the destination session for a signed coordinated ticket. */
+    public Map<String,Object> createCoordinatedTransfer(String baseUrl, String transferId,
+                                                        Map<String,Object> ticket, String ticketSignature,
+                                                        NetworkMembershipService membership) throws Exception {
+        Map<String,Object> body = new LinkedHashMap<>();
+        body.put("kind", "coordinated");
+        body.put("transferId", transferId);
+        body.put("ticket", ticket);
+        body.put("ticketSignature", ticketSignature);
+        return postJson(baseUrl, "/network/transfers", body, membership);
+    }
+
+    /** Asks the source device to execute a coordinated ticket directly to the destination. */
+    public Map<String,Object> executeCoordinatedTransfer(String sourceBaseUrl, Map<String,Object> ticket,
+                                                         String ticketSignature,
+                                                         NetworkMembershipService membership) throws Exception {
+        Map<String,Object> body = new LinkedHashMap<>();
+        body.put("ticket", ticket);
+        body.put("ticketSignature", ticketSignature);
+        return postJson(sourceBaseUrl, "/network/coordinated/transfers", body, membership);
+    }
+
+    public Map<String,Object> coordinatedStatus(String sourceBaseUrl, String requestId,
+                                                NetworkMembershipService membership) throws Exception {
+        return getJson(sourceBaseUrl, "/network/coordinated/transfers/" + encode(requestId), membership);
+    }
+
     public Map<String,Object> abortTransfer(String baseUrl, String transferId,
                                             NetworkMembershipService membership) throws Exception {
         return deleteJson(baseUrl, "/network/transfers/" + encode(transferId), membership);
+    }
+
+    /**
+     * Sends one already-bounded chunk to a receiver session. Exposed so
+     * interruption and resume tests can seed verified chunks without
+     * reimplementing the authenticated chunk envelope.
+     */
+    public void sendTransferChunk(String baseUrl, String transferId, int index, byte[] bytes,
+                                  NetworkMembershipService membership) throws Exception {
+        putTransferChunk(baseUrl, transferId, index, bytes, membership);
     }
 
     private void putTransferChunk(String baseUrl, String transferId, int index, byte[] bytes,

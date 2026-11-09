@@ -76,6 +76,7 @@ public final class PersonalCloudCli {
             case "reference-grants" -> referenceGrants(client, args, start);
             case "reference-snapshots" -> referenceSnapshots(client, args, start);
             case "managed" -> managed(client, args, start);
+            case "coordinated" -> coordinated(client, args, start);
             case "policy" -> policy(client, args, start);
             case "filesystem" -> filesystem(client, args, start);
             default -> throw new IllegalArgumentException("Unknown command: " + command);
@@ -247,6 +248,78 @@ public final class PersonalCloudCli {
 
     private static String policyPath(String value) {
         return ".".equals(value) ? "" : value;
+    }
+
+    private static void coordinated(LocalControlClient client, String[] args, int start) throws Exception {
+        if (start >= args.length) {
+            throw new IllegalArgumentException("Expected coordinated plan, prepare, transfer, status, retry or list.");
+        }
+        switch (args[start++]) {
+            case "plan" -> {
+                requireCount(args, start, 6, 6,
+                        "coordinated plan <source-node-id> <source-root-id> <source-path> <destination-node-id> <destination-root-id> <destination-path>");
+                print(asMap(client.planCoordinatedTransfer(args[start], args[start + 1], args[start + 2],
+                        args[start + 3], args[start + 4], args[start + 5]).get("plan")));
+            }
+            case "prepare" -> {
+                requireCount(args, start, 7, Integer.MAX_VALUE,
+                        "coordinated prepare <source-node-id> <source-root-id> <source-path> <destination-node-id> <destination-root-id> <destination-path> <COPY|MOVE> [--overwrite] [--source-approval ID] [--destination-approval ID] [--ttl-seconds N]");
+                CoordinatedOptions options = coordinatedOptions(args, start + 7);
+                print(client.prepareCoordinatedTransfer(args[start], args[start + 1], args[start + 2],
+                        args[start + 3], args[start + 4], args[start + 5], args[start + 6],
+                        options.overwrite, options.sourceApprovalId, options.destinationApprovalId,
+                        options.ttlSeconds));
+            }
+            case "transfer" -> {
+                requireCount(args, start, 7, Integer.MAX_VALUE,
+                        "coordinated transfer <source-node-id> <source-root-id> <source-path> <destination-node-id> <destination-root-id> <destination-path> <COPY|MOVE> [--overwrite] [--source-approval ID] [--destination-approval ID] [--ttl-seconds N]");
+                CoordinatedOptions options = coordinatedOptions(args, start + 7);
+                print(asMap(client.coordinateTransfer(args[start], args[start + 1], args[start + 2],
+                        args[start + 3], args[start + 4], args[start + 5], args[start + 6],
+                        options.overwrite, options.sourceApprovalId, options.destinationApprovalId,
+                        options.ttlSeconds).get("transfer")));
+            }
+            case "status" -> {
+                requireCount(args, start, 1, 1, "coordinated status <request-id>");
+                print(asMap(client.coordinatedTransferStatus(args[start]).get("status")));
+            }
+            case "retry" -> {
+                requireCount(args, start, 1, 1, "coordinated retry <request-id>");
+                print(asMap(client.retryCoordinatedTransfer(args[start]).get("transfer")));
+            }
+            case "list" -> client.listCoordinatedTransfers().forEach(PersonalCloudCli::print);
+            default -> throw new IllegalArgumentException("Unknown coordinated transfer command.");
+        }
+    }
+
+    private static CoordinatedOptions coordinatedOptions(String[] args, int start) {
+        CoordinatedOptions options = new CoordinatedOptions();
+        for (int index = start; index < args.length; index++) {
+            switch (args[index]) {
+                case "--overwrite" -> options.overwrite = true;
+                case "--source-approval" -> {
+                    if (++index >= args.length) throw new IllegalArgumentException("Missing value after --source-approval.");
+                    options.sourceApprovalId = args[index];
+                }
+                case "--destination-approval" -> {
+                    if (++index >= args.length) throw new IllegalArgumentException("Missing value after --destination-approval.");
+                    options.destinationApprovalId = args[index];
+                }
+                case "--ttl-seconds" -> {
+                    if (++index >= args.length) throw new IllegalArgumentException("Missing value after --ttl-seconds.");
+                    options.ttlSeconds = Long.parseLong(args[index]);
+                }
+                default -> throw new IllegalArgumentException("Unknown coordinated transfer option: " + args[index]);
+            }
+        }
+        return options;
+    }
+
+    private static final class CoordinatedOptions {
+        private boolean overwrite;
+        private String sourceApprovalId = "";
+        private String destinationApprovalId = "";
+        private long ttlSeconds;
     }
 
     private static void filesystem(LocalControlClient client, String[] args, int start) throws Exception {
@@ -490,6 +563,13 @@ public final class PersonalCloudCli {
                 + "  managed remote-list <storage-node-id>\n"
                 + "  managed remote-download <storage-node-id> <file-id> <new-destination>\n"
                 + "  managed remote-delete <storage-node-id> <file-id>\n\n"
+                + "Three-peer coordinated transfers (Z coordinates, X sends directly to Y):\n"
+                + "  coordinated plan <source-node-id> <source-root-id> <source-path> <destination-node-id> <destination-root-id> <destination-path>\n"
+                + "  coordinated prepare <source-node-id> <source-root-id> <source-path> <destination-node-id> <destination-root-id> <destination-path> <COPY|MOVE> [--overwrite] [--source-approval ID] [--destination-approval ID] [--ttl-seconds N]\n"
+                + "  coordinated transfer <source-node-id> <source-root-id> <source-path> <destination-node-id> <destination-root-id> <destination-path> <COPY|MOVE> [--overwrite] [--source-approval ID] [--destination-approval ID] [--ttl-seconds N]\n"
+                + "  coordinated status <request-id>\n"
+                + "  coordinated retry <request-id>\n"
+                + "  coordinated list\n\n"
                 + "Permissions (DOWNLOAD or DOWNLOAD+DELETE):\n"
                 + "  grants list\n"
                 + "  grants create <peer-node-id> <relative-path> <permission>\n"
