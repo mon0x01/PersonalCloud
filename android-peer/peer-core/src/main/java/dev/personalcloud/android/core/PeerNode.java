@@ -235,9 +235,7 @@ public final class PeerNode implements AutoCloseable {
                 response.put("members", membership.membersForWire()); return json(200, response);
             }
             if ("GET".equals(req.method) && "/network/presence".equals(path)) {
-                Map<String,Object> response = map(); response.put("nodeId", nodeId); response.put("nodeName", nodeName);
-                response.put("endpoint", membership.status().get("endpoint"));
-                response.put("online", true); response.put("time", Instant.now().toString()); return json(200, response);
+                return json(200, membership.signedPresence());
             }
             if ("GET".equals(req.method) && "/network/references".equals(path)) {
                 List<Map<String, Object>> references = new ArrayList<>(networkStorage.listReferencesForMember(requesterId));

@@ -64,17 +64,19 @@ public final class PersonalCloudNode implements AutoCloseable {
 
     public synchronized void start() throws Exception {
         if (started) throw new IllegalStateException("PersonalCloud node is already started.");
-        // Persist the endpoint that this process will actually bind before either
-        // the peer API or the local control socket starts serving member data.
-        membership.reconcileLocalEndpoint();
-        localControl.start();
         try {
+            // Persist the endpoint that this process will actually bind before
+            // either the peer API or the local control socket serves member data.
+            membership.reconcileLocalEndpoint();
+            localControl.start();
             protocol.start();
             catalogue.start();
             started = true;
         } catch (Exception failure) {
-            localControl.close();
-            files.close();
+            try { protocol.close(); } catch (Exception ignored) { }
+            try { catalogue.close(); } catch (Exception ignored) { }
+            try { localControl.close(); } catch (Exception ignored) { }
+            try { files.close(); } catch (Exception ignored) { }
             throw failure;
         }
     }

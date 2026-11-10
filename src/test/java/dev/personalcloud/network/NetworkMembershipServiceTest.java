@@ -75,6 +75,36 @@ public final class NetworkMembershipServiceTest {
         check(MembershipCertificate.verify(String.valueOf(approved.get("certificate"))).nodeId().equals(nodeId),
                 "issued membership certificate must identify the applicant");
 
+        // Presence must bind the advertised endpoint to the member signing key,
+        // not only to the TLS connection that happened to serve the response.
+        Map<String, Object> rootPresence = root.signedPresence();
+        String rootEndpoint = String.valueOf(rootPresence.get("endpoint"));
+        check("personalcloud-presence/1".equals(rootPresence.get("presenceVersion"))
+                        && !String.valueOf(rootPresence.get("signature")).isBlank(),
+                "presence must include a version and member signature");
+        check(rootEndpoint.equals(joining.verifyPresence(rootPresence, rootConfig.nodeId(), rootEndpoint).get("endpoint")),
+                "a correctly signed peer presence must verify against the member certificate");
+
+        Map<String, Object> tamperedPresence = new LinkedHashMap<>(rootPresence);
+        tamperedPresence.put("endpoint", "http://127.0.0.1:19999");
+        boolean tamperedPresenceRejected = false;
+        try { joining.verifyPresence(tamperedPresence, rootConfig.nodeId(), rootEndpoint); }
+        catch (SecurityException expected) { tamperedPresenceRejected = true; }
+        check(tamperedPresenceRejected, "a modified signed presence must be rejected");
+
+        Map<String, Object> unsignedMovedPresence = new LinkedHashMap<>(rootPresence);
+        unsignedMovedPresence.remove("signature");
+        unsignedMovedPresence.put("endpoint", "http://127.0.0.1:19999");
+        boolean unsignedMoveRejected = false;
+        try { joining.verifyPresence(unsignedMovedPresence, rootConfig.nodeId(), rootEndpoint); }
+        catch (SecurityException expected) { unsignedMoveRejected = true; }
+        check(unsignedMoveRejected, "legacy unsigned presence must never move the certificate-bound endpoint");
+
+        Map<String, Object> unsignedSamePresence = new LinkedHashMap<>(rootPresence);
+        unsignedSamePresence.remove("signature");
+        check(joining.verifyPresence(unsignedSamePresence, rootConfig.nodeId(), rootEndpoint) != null,
+                "legacy unsigned presence must remain compatible for an unchanged bound endpoint");
+
         Map<String, String> headers = joining.createAuthHeaders("GET", "/network/members", new byte[0]);
         Map<String, List<String>> multiHeaders = new LinkedHashMap<>();
         headers.forEach((key, value) -> multiHeaders.put(key, List.of(value)));

@@ -1,6 +1,6 @@
 # PersonalCloud project status
 
-Last updated: 2026-11-05
+Last updated: 2026-11-10
 
 ## Product direction
 
@@ -78,6 +78,18 @@ PersonalCloud is a Java-only private network of personally operated devices. Eve
 - Android catalogue imports preserve newer locally observed heartbeat state rather than rolling it back from an older peer snapshot; implausibly future heartbeat timestamps are rejected.
 - Added deterministic Android multi-peer blocking-transport tests proving parallel progress and monitor availability, plus desktop/Android stale-presence regression coverage.
 
+### Protocol and storage reliability hardening (M6) — 2026-11-10
+- Bounded JSON parsing to 16 MiB and 64 nesting levels before recursive descent.
+- Added bounded per-source request windows for ordinary peer traffic, enrollment challenges and enrollment submissions, plus a per-member filesystem-operation window. Defaults are 600 requests, 30 challenges, 12 enrollment submissions and 300 filesystem operations per minute, with `PERSONALCLOUD_RATE_LIMIT_*` overrides.
+- Presence is now signed by the member key and binds the advertised endpoint. Desktop and Android catalogue synchronization verify the signature against the member certificate; legacy unsigned presence is accepted only for the unchanged certificate-bound endpoint.
+- Endpoint validation rejects credentials, query/fragment data, oversized hosts, and wildcard, link-local or multicast IP literals while retaining loopback and private-LAN peers.
+- Pending protection approvals are bounded per member (32) and per node (256). Transfer sessions are bounded per node (16) and per member (4), with independently configurable aggregate and per-member staging budgets defaulting to twice the per-file limit. Coordinated-ticket claims are pruned and capped.
+- Reference snapshot retention now evicts the oldest snapshots first per path and globally, so global pressure cannot delete a newer recovery point while retaining older ones.
+- Added owner-side audit records for eligible-filesystem writes, directories, moves, deletes, approval requests, admission approval/rejection, revocation, reference-grant changes and filesystem consent. Records contain identifiers, paths and digests, not contents or credentials.
+- Node startup failure now closes the protocol, catalogue, control and file components; protocol close is idempotent.
+- Added `JsonLimitsTest`, `SecurityMonitorRequestLimitTest`, `ProtectionApprovalLimitTest`, `ReferenceVersionRetentionTest`, `StorageFaultInjectionTest`, `TransferQuotaTest` and presence regression assertions. The fault-injection tests cover interrupted streams, digest mismatch, destination conflict, persistence failure after publication, restart recovery, staging cleanup and cancelled snapshots.
+- Automated fault injection does not represent real disk-full, power-loss, filesystem-corruption or physical-device behavior. Those, tiered per-member filesystem quotas, per-member TLS pinning and an independent security audit remain outstanding.
+
 ### Android integration (peer-core tested; app framework build pending)
 - Android peer-core now implements the same password-proof enrollment, explicit approval, Ed25519 membership certificates, signed active-member requests, replay protection, member catalogue and revocation model as desktop.
 - Simulated desktop–Android integration exercises both directions: Android joins a desktop-created network, receives approval, verifies certificates, signs heartbeats, synchronizes member/catalogue status, reads and shares references, performs ranged reads, places managed files and exercises deletion permissions.
@@ -99,7 +111,7 @@ Run the complete automated suite from the repository root:
 ./scripts/test-all.sh
 ```
 
-This builds the desktop Java node; runs desktop storage, control, membership, network-protocol, remote-reference, managed-storage and remote byte-range integrity tests; runs Android peer-core and simulated desktop–Android interoperability tests; statically validates Android app integration; and performs Linux integration shell/static checks. It does not require a physical Android device, KDE session, Android SDK or native FUSE mount.
+This builds the desktop Java node; runs desktop storage, control, membership, network-protocol, remote-reference, managed-storage and remote byte-range integrity tests; runs Android peer-core and simulated desktop–Android interoperability tests; statically validates Android app integration; and performs Linux integration shell/static checks. It does not require a physical Android device, KDE session, Android SDK or native FUSE mount. The complete scoped suite passed on 2026-11-10 after the M6 hardening changes.
 
 ## Remaining implementation scope
 
@@ -109,7 +121,7 @@ This builds the desktop Java node; runs desktop storage, control, membership, ne
 - Physical Android APK/SAF/lifecycle validation and live Linux FUSE mount validation.
 - Transfer UX must persist and present the transfer ID/progress across app restarts; the receiver protocol and peer-core resume APIs are implemented, but end-user UI recovery needs device validation.
 - Read-only desktop direct-connectivity diagnostics now enumerate interfaces, validate local TLS material and compare bounded STUN UDP mappings. Global interface candidates are reported independently from the configured bind address, with a separate bound-family match field. A desktop TLS provisioning script now creates an encrypted local CA key and a SAN-correct PKCS#12 server identity for active non-temporary interface addresses without opening the listener or changing firewall settings. Actual inbound HTTPS reachability from another network, CGNAT behavior and public IPv6 acceptance still require independent devices/networks.
-- Load/concurrency tests at large file sizes, long-duration stability, performance profiling, independent security audit and real-device acceptance tests. There is deliberately no relay fallback.
+- Real disk-full, abrupt power-loss and filesystem-corruption fault testing; load/concurrency tests at large file sizes; long-duration stability; performance profiling; tiered per-member filesystem quotas; per-member TLS certificate pinning; independent security audit; and real-device acceptance tests. There is deliberately no relay fallback.
 
 ## Validation boundary
 

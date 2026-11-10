@@ -749,11 +749,8 @@ public final class NetworkMembershipClient {
         Map<String, Object> presence = catalogueTransport.getSignedJson(peerBaseUrl,
                 "/network/presence", presenceHeaders, trustedCaPath);
         if (!Boolean.TRUE.equals(presence.get("online"))) throw new IllegalStateException("Remote member reported itself offline.");
+        verifyPresence(presence, expectedNodeId, peerBaseUrl);
         String remoteId = required(presence, "nodeId");
-        if (!expectedNodeId.equals(remoteId)) {
-            throw new SecurityException("The connected endpoint identifies as a different network member; expected "
-                    + expectedNodeId + " but received " + remoteId + ".");
-        }
         importMembers(list);
         recordHeartbeat(remoteId, required(presence, "endpoint"), required(presence, "nodeName"));
         return Map.of("networkId", networkId, "members", members(), "peerNodeId", remoteId,
@@ -849,6 +846,72 @@ public final class NetworkMembershipClient {
         }
         if (match == null) throw new SecurityException("The endpoint is not registered to an active member of this PersonalCloud network.");
         return match;
+    }
+
+    /** Signed presence binds the advertised endpoint to the member key, not just TLS. */
+    public synchronized Map<String, Object> signedPresence() throws Exception {
+        requireNetwork();
+        Map<String, Object> presence = new LinkedHashMap<String, Object>();
+        presence.put("presenceVersion", "personalcloud-presence/1");
+        presence.put("networkId", string(state.get("networkId")));
+        presence.put("nodeId", nodeId);
+        presence.put("nodeName", nodeName);
+        presence.put("endpoint", localEndpoint);
+        presence.put("online", true);
+        presence.put("time", Instant.now().toString());
+        presence.put("signature", Base64.getEncoder().encodeToString(
+                identity.sign(presenceBytes(presence))));
+        return presence;
+    }
+
+    /**
+     * Verifies a peer presence against its signed member certificate. Legacy
+     * unsigned presence may not move an endpoint away from the certificate's
+     * bound endpoint.
+     */
+    public synchronized Map<String, Object> verifyPresence(Map<String, Object> presence,
+                                                           String expectedNodeId,
+                                                           String connectedEndpoint) throws Exception {
+        requireNetwork();
+        if (!expectedNodeId.equals(string(presence.get("nodeId")))
+                || !string(state.get("networkId")).equals(string(presence.get("networkId")))) {
+            throw new SecurityException("Peer presence is bound to a different network or member.");
+        }
+        String endpoint = required(presence, "endpoint");
+        validateEndpoint(endpoint);
+        Map<String, Object> member = object(object(state.get("members")).get(expectedNodeId));
+        if (member.isEmpty() || !"ACTIVE".equals(string(member.get("status")))) {
+            throw new SecurityException("Peer presence is from an unknown or inactive member.");
+        }
+        CertificateInfo info = verifyCertificate(required(member, "certificate"));
+        String signature = string(presence.get("signature"));
+        if (!signature.isEmpty()) {
+            byte[] decoded;
+            try { decoded = Base64.getDecoder().decode(signature); }
+            catch (IllegalArgumentException invalid) { throw new SecurityException("Peer presence signature is not valid base64."); }
+            if (!NetworkIdentity.verify(info.publicKey, presenceBytes(presence), decoded)) {
+                throw new SecurityException("Peer presence signature is invalid.");
+            }
+            Instant issued;
+            try { issued = Instant.parse(required(presence, "time")); }
+            catch (Exception invalid) { throw new SecurityException("Peer presence timestamp is invalid."); }
+            long now = Instant.now().getEpochSecond();
+            if (issued.getEpochSecond() < now - 60 || issued.getEpochSecond() > now + 60) {
+                throw new SecurityException("Peer presence is stale or outside the permitted clock skew.");
+            }
+        } else {
+            String connected = connectedEndpoint == null ? "" : connectedEndpoint.trim();
+            if (!endpoint.equals(connected) || !endpoint.equals(info.endpoint)) {
+                throw new SecurityException("An unsigned peer presence may not change the member endpoint.");
+            }
+        }
+        return presence;
+    }
+
+    private static byte[] presenceBytes(Map<String, Object> presence) {
+        Map<String, Object> body = new LinkedHashMap<String, Object>(presence);
+        body.remove("signature");
+        return Json.stringify(body).getBytes(StandardCharsets.UTF_8);
     }
 
     /** Sends this node's signed presence to another active network member. */
@@ -1039,9 +1102,30 @@ public final class NetworkMembershipClient {
     private static void validateName(String value) { if (value == null || value.isBlank() || value.length() > 80 || value.chars().anyMatch(Character::isISOControl)) throw new IllegalArgumentException("Device/network name must contain 1–80 printable characters."); }
     private static void validateAccount(String value) { if (value == null || !value.matches("[A-Za-z0-9._-]{3,64}")) throw new IllegalArgumentException("Network account must use 3–64 letters, numbers, dot, underscore or hyphen characters."); }
     private static void validateEndpoint(String value) throws Exception {
-        URI uri = URI.create(value);
-        if (uri.getHost() == null || uri.getUserInfo() != null || uri.getRawQuery() != null || uri.getRawFragment() != null || uri.getPort() < 1 || uri.getPort() > 65535) throw new SecurityException("Invalid device endpoint.");
-        if (!"https".equalsIgnoreCase(uri.getScheme()) && !("http".equalsIgnoreCase(uri.getScheme()) && InetAddress.getByName(uri.getHost()).isLoopbackAddress())) throw new SecurityException("Non-loopback PersonalCloud endpoints require HTTPS.");
+        URI uri;
+        try { uri = URI.create(value); }
+        catch (Exception invalid) { throw new SecurityException("Invalid device endpoint."); }
+        String host = uri.getHost();
+        if (host == null || host.length() > 253 || uri.getUserInfo() != null || uri.getRawQuery() != null
+                || uri.getRawFragment() != null || uri.getPort() < 1 || uri.getPort() > 65535) {
+            throw new SecurityException("Invalid device endpoint.");
+        }
+        if (!"https".equalsIgnoreCase(uri.getScheme())
+                && !("http".equalsIgnoreCase(uri.getScheme()) && InetAddress.getByName(host).isLoopbackAddress())) {
+            throw new SecurityException("Non-loopback PersonalCloud endpoints require HTTPS.");
+        }
+        // Match desktop enforcement: wildcard, link-local and multicast
+        // address literals are never valid direct peer targets.
+        if (isIpLiteral(host)) {
+            InetAddress address = InetAddress.getByName(host);
+            if (address.isAnyLocalAddress() || address.isLinkLocalAddress() || address.isMulticastAddress()) {
+                throw new SecurityException("Peer endpoints cannot point at wildcard, link-local or multicast addresses.");
+            }
+        }
+    }
+
+    private static boolean isIpLiteral(String host) {
+        return host.indexOf(':') >= 0 || host.matches("[0-9.]+");
     }
     private static String normalizeBase(String value) { if (value == null) throw new IllegalArgumentException("Peer URL is required."); String result = value.trim().replaceAll("/+$", ""); if (!(result.startsWith("https://") || result.startsWith("http://127.0.0.1") || result.startsWith("http://localhost"))) throw new SecurityException("Network peer URL must use HTTPS except for loopback testing."); return result; }
     private static String required(Map<String, ?> map, String key) { String value = string(map.get(key)); if (value.isEmpty()) throw new IllegalArgumentException("Network response omitted '" + key + "'."); return value; }

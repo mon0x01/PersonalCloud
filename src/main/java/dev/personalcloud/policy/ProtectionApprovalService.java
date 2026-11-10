@@ -16,15 +16,32 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class ProtectionApprovalService {
     private static final long DEFAULT_TTL_SECONDS = 300;
     private static final long MAX_TTL_SECONDS = 3600;
+    private static final int MAX_PENDING_PER_MEMBER = envInt("PERSONALCLOUD_MAX_PENDING_APPROVALS_PER_MEMBER", 32, 1, 1024);
+    private static final int MAX_PENDING_TOTAL = envInt("PERSONALCLOUD_MAX_PENDING_APPROVALS", 256, 8, 8192);
+    private static final long RETENTION_SECONDS = 3600;
 
     private final Map<String, Approval> approvals = new ConcurrentHashMap<>();
 
-    public Map<String, Object> request(String memberId, String rootId, String path,
-                                       PolicyOperation operation, long ttlSeconds) {
+    public synchronized Map<String, Object> request(String memberId, String rootId, String path,
+                                                    PolicyOperation operation, long ttlSeconds) {
         requireText(memberId, "A requesting member ID is required.");
         requireText(rootId, "An eligible root ID is required.");
         if (operation == null || !operation.destructive()) {
             throw new IllegalArgumentException("Only destructive operations require protection approval.");
+        }
+        purgeExpired();
+        int memberPending = 0;
+        int totalPending = 0;
+        for (Approval existing : approvals.values()) {
+            if (existing.state != ApprovalState.PENDING) continue;
+            totalPending++;
+            if (existing.memberId.equals(memberId)) memberPending++;
+        }
+        if (memberPending >= MAX_PENDING_PER_MEMBER) {
+            throw new IllegalStateException("This device has reached its pending protection-approval limit.");
+        }
+        if (totalPending >= MAX_PENDING_TOTAL) {
+            throw new IllegalStateException("The node has reached its pending protection-approval limit.");
         }
         long ttl = ttlSeconds <= 0 ? DEFAULT_TTL_SECONDS : Math.min(ttlSeconds, MAX_TTL_SECONDS);
         String id = UUID.randomUUID().toString();
@@ -88,6 +105,26 @@ public final class ProtectionApprovalService {
         }
         result.sort((left, right) -> String.valueOf(right.get("expiresAt")).compareTo(String.valueOf(left.get("expiresAt"))));
         return java.util.List.copyOf(result);
+    }
+
+    /** Drops old terminal approvals so hostile request churn stays bounded. */
+    private void purgeExpired() {
+        Instant cutoff = Instant.now().minusSeconds(RETENTION_SECONDS);
+        approvals.entrySet().removeIf(entry -> {
+            Approval approval = entry.getValue();
+            approval.expireIfNeeded();
+            return approval.state != ApprovalState.PENDING && approval.expiresAt.isBefore(cutoff);
+        });
+    }
+
+    private static int envInt(String name, int fallback, int minimum, int maximum) {
+        String value = System.getenv(name);
+        if (value == null || value.isBlank()) return fallback;
+        try {
+            return Math.max(minimum, Math.min(maximum, Integer.parseInt(value.trim())));
+        } catch (NumberFormatException invalid) {
+            return fallback;
+        }
     }
 
     private Approval require(String approvalId) {

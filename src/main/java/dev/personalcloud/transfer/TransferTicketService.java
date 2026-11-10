@@ -13,6 +13,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
@@ -33,6 +34,8 @@ public final class TransferTicketService {
     public static final long MAX_TTL_SECONDS = 3600;
     private static final long CLOCK_SKEW_SECONDS = 120;
     private static final String CLAIM_PREFIX = "coordinatedTicketClaim";
+    private static final int MAX_CLAIMS = 5000;
+    private static final long CLAIM_RETENTION_SECONDS = MAX_TTL_SECONDS * 2L;
 
     private final StateStore state;
     private final NetworkMembershipService membership;
@@ -149,7 +152,32 @@ public final class TransferTicketService {
         row.put("issuerNodeId", text(ticket, "issuerNodeId"));
         row.put("ticketSha256", digest);
         row.put("claimedAt", Instant.now().toString());
+        pruneClaims();
         state.putRecord(CLAIM_PREFIX, ticketId, row);
+    }
+
+    /** Keeps durable ticket claims bounded; expired tickets can no longer be replayed. */
+    private void pruneClaims() throws Exception {
+        List<Map<String, String>> claims = state.records(CLAIM_PREFIX);
+        if (claims.isEmpty()) return;
+        Instant cutoff = Instant.now().minusSeconds(CLAIM_RETENTION_SECONDS);
+        List<Map<String, String>> removable = new java.util.ArrayList<>();
+        for (Map<String, String> claim : claims) {
+            try {
+                if (Instant.parse(claim.getOrDefault("claimedAt", "")).isBefore(cutoff)) removable.add(claim);
+            } catch (Exception ignored) {
+                removable.add(claim);
+            }
+        }
+        int excess = claims.size() - removable.size() - MAX_CLAIMS;
+        if (excess > 0) {
+            claims.stream()
+                    .filter(claim -> !removable.contains(claim))
+                    .sorted(java.util.Comparator.comparing(claim -> claim.getOrDefault("claimedAt", "")))
+                    .limit(excess)
+                    .forEach(removable::add);
+        }
+        for (Map<String, String> claim : removable) state.removeRecord(CLAIM_PREFIX, claim.get("_id"));
     }
 
     public synchronized Map<String, String> claimRecord(String ticketId) {

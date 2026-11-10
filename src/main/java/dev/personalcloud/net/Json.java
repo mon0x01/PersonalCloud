@@ -8,6 +8,10 @@ import java.util.Map;
 
 /** Minimal JSON reader/writer for the small node protocol; no external JSON dependency. */
 public final class Json {
+    /** Bounds parser work and recursion so hostile nesting cannot exhaust the stack. */
+    public static final int MAX_INPUT_CHARS = 16 * 1024 * 1024;
+    public static final int MAX_DEPTH = 64;
+
     private Json() {}
 
     public static String stringify(Object value) {
@@ -78,6 +82,9 @@ public final class Json {
     }
 
     public static Object parse(String input) {
+        if (input != null && input.length() > MAX_INPUT_CHARS) {
+            throw new IllegalArgumentException("JSON document exceeds the permitted size.");
+        }
         Parser parser = new Parser(input);
         Object value = parser.value();
         parser.space();
@@ -95,6 +102,7 @@ public final class Json {
     private static final class Parser {
         private final String text;
         private int index;
+        private int depth;
         Parser(String text) { this.text = text == null ? "" : text; }
         boolean end() { return index >= text.length(); }
         void space() { while (!end() && Character.isWhitespace(text.charAt(index))) index++; }
@@ -102,15 +110,21 @@ public final class Json {
         Object value() {
             space();
             if (end()) throw error("Expected a value");
-            return switch (text.charAt(index)) {
-                case '{' -> objectValue();
-                case '[' -> arrayValue();
-                case '"' -> stringValue();
-                case 't' -> literal("true", Boolean.TRUE);
-                case 'f' -> literal("false", Boolean.FALSE);
-                case 'n' -> literal("null", null);
-                default -> numberValue();
-            };
+            if (depth >= MAX_DEPTH) throw error("JSON nesting is too deep");
+            depth++;
+            try {
+                return switch (text.charAt(index)) {
+                    case '{' -> objectValue();
+                    case '[' -> arrayValue();
+                    case '"' -> stringValue();
+                    case 't' -> literal("true", Boolean.TRUE);
+                    case 'f' -> literal("false", Boolean.FALSE);
+                    case 'n' -> literal("null", null);
+                    default -> numberValue();
+                };
+            } finally {
+                depth--;
+            }
         }
 
         private Map<String, Object> objectValue() {

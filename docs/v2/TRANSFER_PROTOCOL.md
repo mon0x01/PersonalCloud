@@ -22,13 +22,14 @@ Transfer a whole file directly from one authenticated member to another without 
 - Full-file SHA-256 is checked before invoking the managed-storage publication path.
 - The commit callback receives the stable transfer ID. Managed storage records that ID so a retry after a crash between file publication and session cleanup returns the already committed file rather than creating a duplicate or failing on its own destination.
 - Publication retains the existing no-overwrite guarantee.
-- Sessions expire after seven days. Active sessions are limited by count and aggregate staging reservation.
+- Sessions expire after seven days. Active sessions are limited by count and aggregate/per-member staging reservation. The default caps are 16 sessions per node and 4 per uploader (`PERSONALCLOUD_MAX_TRANSFER_SESSIONS`, `PERSONALCLOUD_MAX_TRANSFER_SESSIONS_PER_MEMBER`); aggregate and per-member staging default to twice `PERSONALCLOUD_MAX_FILE_BYTES` and can be overridden with `PERSONALCLOUD_MAX_TRANSFER_STAGING_BYTES` and `PERSONALCLOUD_MAX_TRANSFER_STAGING_BYTES_PER_MEMBER`.
 - The receiver hashes chunks in one pass and then streams them sequentially into the managed-storage commit path. It does not build a second complete assembly copy.
 
 ## Current limits and caveats
 
 - Default chunk size: 4 MiB (receiver-advertised in session status).
 - Desktop maximum file size follows `PERSONALCLOUD_MAX_FILE_BYTES`; Android managed storage retains its 20 GiB limit.
+- Quota rejection is a deliberate `409 Conflict`, not a transient network failure. An interrupted sender should free or abort other sessions before retrying.
 - Direct reachability remains subject to IPv6, port forwarding, NAT and firewall conditions. This protocol does not add relay fallback.
 - The legacy whole-file `PUT /network/managed/files` route remains available for compatibility; new clients use the resumable protocol.
 - Client applications must retain the transfer ID when a transfer is interrupted to resume it later. The desktop client exposes the ID through `RemoteTransferInterruptedException`; Android's connector reports it in the interruption exception message and exposes a resume API.

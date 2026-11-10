@@ -17,7 +17,8 @@ import java.util.function.BiFunction;
 public final class ResumableTransferManager {
     public static final int DEFAULT_CHUNK_BYTES = 4 * 1024 * 1024;
     private static final long SESSION_TTL_MILLIS = 7L * 24 * 60 * 60 * 1000;
-    private static final int MAX_SESSIONS = 16;
+    private static final int MAX_SESSIONS = envInt("PERSONALCLOUD_MAX_TRANSFER_SESSIONS", 16, 1, 256);
+    private static final int MAX_SESSIONS_PER_MEMBER = envInt("PERSONALCLOUD_MAX_TRANSFER_SESSIONS_PER_MEMBER", 4, 1, 64);
 
     @FunctionalInterface
     public interface Committer {
@@ -42,6 +43,8 @@ public final class ResumableTransferManager {
     private final String ownerNodeId;
     private final long maxFileBytes;
     private final int chunkBytes;
+    private final long stagingBudgetBytes;
+    private final long memberStagingBudgetBytes;
     private final Committer committer;
     private final SessionCommitter sessionCommitter;
     private final java.util.concurrent.locks.ReentrantLock[] sessionLocks = createSessionLocks();
@@ -66,6 +69,11 @@ public final class ResumableTransferManager {
         this.ownerNodeId = ownerNodeId;
         this.maxFileBytes = maxFileBytes;
         this.chunkBytes = chunkBytes;
+        long defaultStagingBudget = maxFileBytes > Long.MAX_VALUE / 2 ? Long.MAX_VALUE : maxFileBytes * 2;
+        this.stagingBudgetBytes = envLong("PERSONALCLOUD_MAX_TRANSFER_STAGING_BYTES",
+                defaultStagingBudget, 0, Long.MAX_VALUE);
+        this.memberStagingBudgetBytes = envLong("PERSONALCLOUD_MAX_TRANSFER_STAGING_BYTES_PER_MEMBER",
+                defaultStagingBudget, 0, Long.MAX_VALUE);
         this.committer = Objects.requireNonNull(committer);
         this.sessionCommitter = sessionCommitter;
         Files.createDirectories(dataDirectory);
@@ -106,27 +114,7 @@ public final class ResumableTransferManager {
             }
             return statusFor(id, existing);
         }
-        List<Path> active = sessionDirectories();
-        long activeCount = 0;
-        long reserved = 0;
-        for (Path existingDir : active) {
-            Path journal = existingDir.resolve("session.properties");
-            if (!Files.isRegularFile(journal, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(journal)) continue;
-            Properties existing = new Properties();
-            try (InputStream input = Files.newInputStream(journal, LinkOption.NOFOLLOW_LINKS)) { existing.load(input); }
-            if (!"COMMITTED".equals(existing.getProperty("state"))) {
-                activeCount++;
-                reserved = Math.addExact(reserved, number(existing, "size"));
-            }
-        }
-        if (activeCount >= MAX_SESSIONS) throw new IllegalStateException("This node has reached its active transfer-session limit.");
-        long reservationLimit = maxFileBytes > Long.MAX_VALUE / 2 ? Long.MAX_VALUE : maxFileBytes * 2;
-        if (size > reservationLimit - Math.min(reserved, reservationLimit)) {
-            throw new IllegalStateException("Active transfer sessions exceed the receiver's reserved staging budget.");
-        }
-        if (size > Files.getFileStore(root).getUsableSpace()) {
-            throw new IllegalStateException("Not enough free space in the transfer staging volume.");
-        }
+        enforceQuota(uploaderNodeId, size);
         Path dir = sessionDirectory(id);
         Files.createDirectory(dir);
         restrictDirectory(dir);
@@ -191,27 +179,7 @@ public final class ResumableTransferManager {
             }
             return statusFor(id, existing);
         }
-        List<Path> active = sessionDirectories();
-        long activeCount = 0;
-        long reserved = 0;
-        for (Path existingDir : active) {
-            Path journal = existingDir.resolve("session.properties");
-            if (!Files.isRegularFile(journal, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(journal)) continue;
-            Properties existing = new Properties();
-            try (InputStream input = Files.newInputStream(journal, LinkOption.NOFOLLOW_LINKS)) { existing.load(input); }
-            if (!"COMMITTED".equals(existing.getProperty("state"))) {
-                activeCount++;
-                reserved = Math.addExact(reserved, number(existing, "size"));
-            }
-        }
-        if (activeCount >= MAX_SESSIONS) throw new IllegalStateException("This node has reached its active transfer-session limit.");
-        long reservationLimit = maxFileBytes > Long.MAX_VALUE / 2 ? Long.MAX_VALUE : maxFileBytes * 2;
-        if (size > reservationLimit - Math.min(reserved, reservationLimit)) {
-            throw new IllegalStateException("Active transfer sessions exceed the receiver's reserved staging budget.");
-        }
-        if (size > Files.getFileStore(this.root).getUsableSpace()) {
-            throw new IllegalStateException("Not enough free space in the transfer staging volume.");
-        }
+        enforceQuota(uploaderNodeId, size);
         Path dir = sessionDirectory(id);
         Files.createDirectory(dir);
         restrictDirectory(dir);
@@ -517,6 +485,66 @@ public final class ResumableTransferManager {
             } finally {
                 sessionLock.unlock();
             }
+        }
+    }
+
+    /**
+     * Enforces both node-wide and per-member staging limits. Per-member quotas
+     * stop one compromised or buggy peer from consuming every session slot.
+     */
+    private void enforceQuota(String uploaderNodeId, long size) throws Exception {
+        long activeCount = 0;
+        long reserved = 0;
+        long memberActive = 0;
+        long memberReserved = 0;
+        for (Path existingDir : sessionDirectories()) {
+            Path journal = existingDir.resolve("session.properties");
+            if (!Files.isRegularFile(journal, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(journal)) continue;
+            Properties existing = new Properties();
+            try (InputStream input = Files.newInputStream(journal, LinkOption.NOFOLLOW_LINKS)) { existing.load(input); }
+            if ("COMMITTED".equals(existing.getProperty("state"))) continue;
+            long existingSize = number(existing, "size");
+            activeCount++;
+            reserved = Math.addExact(reserved, existingSize);
+            if (uploaderNodeId.equals(existing.getProperty("uploader"))) {
+                memberActive++;
+                memberReserved = Math.addExact(memberReserved, existingSize);
+            }
+        }
+        if (activeCount >= MAX_SESSIONS) {
+            throw new IllegalStateException("This node has reached its active transfer-session limit.");
+        }
+        if (memberActive >= MAX_SESSIONS_PER_MEMBER) {
+            throw new IllegalStateException("This member has reached its active transfer-session limit.");
+        }
+        if (size > stagingBudgetBytes - Math.min(reserved, stagingBudgetBytes)) {
+            throw new IllegalStateException("Active transfer sessions exceed the receiver's reserved staging budget.");
+        }
+        if (size > memberStagingBudgetBytes - Math.min(memberReserved, memberStagingBudgetBytes)) {
+            throw new IllegalStateException("This member's active transfers exceed its reserved staging budget.");
+        }
+        if (size > Files.getFileStore(root).getUsableSpace()) {
+            throw new IllegalStateException("Not enough free space in the transfer staging volume.");
+        }
+    }
+
+    private static int envInt(String name, int fallback, int minimum, int maximum) {
+        String value = System.getenv(name);
+        if (value == null || value.isBlank()) return fallback;
+        try {
+            return Math.max(minimum, Math.min(maximum, Integer.parseInt(value.trim())));
+        } catch (NumberFormatException invalid) {
+            return fallback;
+        }
+    }
+
+    private static long envLong(String name, long fallback, long minimum, long maximum) {
+        String value = System.getenv(name);
+        if (value == null || value.isBlank()) return fallback;
+        try {
+            return Math.max(minimum, Math.min(maximum, Long.parseLong(value.trim())));
+        } catch (NumberFormatException invalid) {
+            return fallback;
         }
     }
 

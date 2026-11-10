@@ -82,9 +82,7 @@ public final class DeviceCatalogueService implements AutoCloseable {
                 return;
             }
             Map<String, Object> presence = client.getJson(endpoint, "/network/presence", membership);
-            if (!nodeId.equals(presence.get("nodeId"))) {
-                throw new SecurityException("Peer endpoint identity does not match the member certificate.");
-            }
+            membership.verifyPresence(presence, nodeId, endpoint);
             String remoteName = String.valueOf(presence.get("nodeName"));
             String remoteEndpoint = String.valueOf(presence.get("endpoint"));
             membership.recordHeartbeat(nodeId, remoteEndpoint, remoteName);

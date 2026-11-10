@@ -53,6 +53,14 @@ import java.util.concurrent.Executors;
  */
 public final class PeerProtocolServer implements AutoCloseable {
     private static final int MAX_FORM_BYTES = 64 * 1024;
+    private static final int RATE_REQUESTS_PER_MINUTE =
+            envInt("PERSONALCLOUD_RATE_LIMIT_REQUESTS_PER_MINUTE", 600, 10, 100_000);
+    private static final int RATE_CHALLENGES_PER_MINUTE =
+            envInt("PERSONALCLOUD_RATE_LIMIT_CHALLENGES_PER_MINUTE", 30, 1, 10_000);
+    private static final int RATE_ENROLLMENTS_PER_MINUTE =
+            envInt("PERSONALCLOUD_RATE_LIMIT_ENROLLMENTS_PER_MINUTE", 12, 1, 10_000);
+    private static final int RATE_FILESYSTEM_OPS_PER_MINUTE =
+            envInt("PERSONALCLOUD_RATE_LIMIT_FILESYSTEM_OPS_PER_MINUTE", 300, 1, 100_000);
     private final AppConfig config;
     private final FileService files;
     private final PeerService peers;
@@ -192,9 +200,19 @@ public final class PeerProtocolServer implements AutoCloseable {
             server = HttpServer.create(address, 64);
         }
         executor = Executors.newVirtualThreadPerTaskExecutor();
-        server.setExecutor(executor);
-        server.createContext("/", this::handle);
-        server.start();
+        try {
+            server.setExecutor(executor);
+            server.createContext("/", this::handle);
+            server.start();
+        } catch (Exception failure) {
+            // A partially initialized listener must not leak a bound port or
+            // worker pool when startup fails.
+            try { server.stop(0); } catch (Exception ignored) { }
+            executor.shutdownNow();
+            server = null;
+            executor = null;
+            throw failure;
+        }
     }
 
     public int port() {
@@ -202,8 +220,8 @@ public final class PeerProtocolServer implements AutoCloseable {
     }
 
     @Override public void close() {
-        if (server != null) server.stop(1);
-        if (executor != null) executor.shutdown();
+        if (server != null) { server.stop(1); server = null; }
+        if (executor != null) { executor.shutdownNow(); executor = null; }
     }
 
     private void handle(HttpExchange exchange) {
@@ -215,7 +233,22 @@ public final class PeerProtocolServer implements AutoCloseable {
 
             String path = exchange.getRequestURI().getPath();
             String method = exchange.getRequestMethod().toUpperCase();
+            String source = clientAddress(exchange);
+            if (!security.requestAllowed("all:" + source, RATE_REQUESTS_PER_MINUTE, 60)) {
+                sendJson(exchange, 429, Map.of("error", "Too many requests from this address; retry shortly."));
+                return;
+            }
             if (path.startsWith("/network/")) {
+                if ("GET".equals(method) && "/network/challenge".equals(path)
+                        && !security.requestAllowed("challenge:" + source, RATE_CHALLENGES_PER_MINUTE, 60)) {
+                    sendJson(exchange, 429, Map.of("error", "Enrollment challenge requests are temporarily rate-limited."));
+                    return;
+                }
+                if ("POST".equals(method) && "/network/enroll".equals(path)
+                        && !security.requestAllowed("enroll:" + source, RATE_ENROLLMENTS_PER_MINUTE, 60)) {
+                    sendJson(exchange, 429, Map.of("error", "Enrollment requests are temporarily rate-limited."));
+                    return;
+                }
                 handleNetworkApi(exchange, path, method);
                 return;
             }
@@ -243,12 +276,22 @@ public final class PeerProtocolServer implements AutoCloseable {
                 }
                 int status = failure instanceof RangeNotSatisfiableException ? 416
                         : failure instanceof SecurityException ? 403
-                        : failure instanceof IllegalArgumentException ? 400 : 500;
+                        : failure instanceof IllegalArgumentException ? 400
+                        : failure instanceof IllegalStateException ? 409 : 500;
                 if (failure instanceof RangeNotSatisfiableException range) {
                     exchange.getResponseHeaders().set("Content-Range", "bytes */" + range.resourceSize);
                     exchange.getResponseHeaders().set("Accept-Ranges", "bytes");
                 }
-                String message = failure.getMessage() == null ? "Unexpected node error." : failure.getMessage();
+                // Unexpected failures may carry filesystem paths or provider
+                // details. Return them only for deliberate, caller-visible
+                // rejections; otherwise fail closed with a generic message.
+                boolean safeMessage = failure instanceof SecurityException
+                        || failure instanceof IllegalArgumentException
+                        || failure instanceof IllegalStateException
+                        || failure instanceof ApprovalRequiredException
+                        || failure instanceof RangeNotSatisfiableException;
+                String message = safeMessage && failure.getMessage() != null
+                        ? failure.getMessage() : "Unexpected node error.";
                 sendJson(exchange, status, Map.of("error", message));
             } catch (Exception ignored) {
                 exchange.close();
@@ -438,9 +481,7 @@ public final class PeerProtocolServer implements AutoCloseable {
             return;
         }
         if ("GET".equals(method) && "/network/presence".equals(path)) {
-            sendJson(exchange, 200, Map.of("nodeId", config.nodeId(), "nodeName", config.nodeName(),
-                    "endpoint", membership.localEndpointForProtocol(), "online", true,
-                    "time", java.time.Instant.now().toString()));
+            sendJson(exchange, 200, membership.signedPresence());
             return;
         }
         String requesterId = exchange.getRequestHeaders().getFirst("X-PC-Node-ID");
@@ -546,7 +587,7 @@ public final class PeerProtocolServer implements AutoCloseable {
         String remainder = path.substring(prefix.length());
         if ("GET".equals(method) && "roots".equals(remainder)) {
             String member = authenticateMember(exchange, method, new byte[0]);
-            if (member == null) return;
+            if (member == null || !filesystemRequestAllowed(member, exchange)) return;
             sendJson(exchange, 200, Map.of("roots", filesystem.rootsForMember()));
             return;
         }
@@ -556,7 +597,7 @@ public final class PeerProtocolServer implements AutoCloseable {
         }
         byte[] body = "POST".equals(method) ? readLimitedBody(exchange.getRequestBody(), 64 * 1024) : new byte[0];
         String member = authenticateMember(exchange, method, body);
-        if (member == null) return;
+        if (member == null || !filesystemRequestAllowed(member, exchange)) return;
         String[] segments = remainder.split("/", -1);
         Map<String, String> query = queryParameters(exchange.getRequestURI().getRawQuery());
         if (segments.length == 2 && "approvals".equals(segments[0])) {
@@ -589,29 +630,41 @@ public final class PeerProtocolServer implements AutoCloseable {
             case "directories" -> {
                 if (!"POST".equals(method)) break;
                 Map<String, Object> request = Json.object(new String(body, StandardCharsets.UTF_8));
-                sendJson(exchange, 201, filesystem.createDirectory(member, rootId, string(request, "path")));
+                Map<String, Object> created = filesystem.createDirectory(member, rootId, string(request, "path"));
+                audit.record("FILESYSTEM_DIRECTORY_CREATED", member,
+                        "root=" + rootId + ", path=" + created.get("path"));
+                sendJson(exchange, 201, created);
                 return;
             }
             case "move" -> {
                 if (!"POST".equals(method)) break;
                 Map<String, Object> request = Json.object(new String(body, StandardCharsets.UTF_8));
-                sendJson(exchange, 200, filesystem.move(member, rootId, string(request, "from"), string(request, "to"),
+                Map<String, Object> moved = filesystem.move(member, rootId, string(request, "from"), string(request, "to"),
                         booleanValue(request, "overwrite", false), optionalString(request, "approvalId"),
-                        optionalString(request, "destinationApprovalId")));
+                        optionalString(request, "destinationApprovalId"));
+                audit.record("FILESYSTEM_MOVED", member, "root=" + rootId
+                        + ", from=" + string(request, "from") + ", to=" + string(request, "to"));
+                sendJson(exchange, 200, moved);
                 return;
             }
             case "entry" -> {
                 if (!"DELETE".equals(method)) break;
-                sendJson(exchange, 200, filesystem.delete(member, rootId, relativePath,
-                        booleanValue(query, "recursive", false), optionalString(query, "approvalId")));
+                Map<String, Object> deleted = filesystem.delete(member, rootId, relativePath,
+                        booleanValue(query, "recursive", false), optionalString(query, "approvalId"));
+                audit.record("FILESYSTEM_DELETED", member, "root=" + rootId + ", path=" + relativePath
+                        + ", recursive=" + booleanValue(query, "recursive", false));
+                sendJson(exchange, 200, deleted);
                 return;
             }
             case "approvals" -> {
                 if (!"POST".equals(method)) break;
                 Map<String, Object> request = Json.object(new String(body, StandardCharsets.UTF_8));
                 String operation = string(request, "operation").strip().toUpperCase(java.util.Locale.ROOT);
-                sendJson(exchange, 201, filesystem.requestApproval(member, rootId, string(request, "path"),
-                        PolicyOperation.valueOf(operation), longValue(request, "ttlSeconds", 0)));
+                Map<String, Object> approval = filesystem.requestApproval(member, rootId, string(request, "path"),
+                        PolicyOperation.valueOf(operation), longValue(request, "ttlSeconds", 0));
+                audit.record("FILESYSTEM_APPROVAL_REQUESTED", member, "root=" + rootId
+                        + ", path=" + string(request, "path") + ", operation=" + operation);
+                sendJson(exchange, 201, approval);
                 return;
             }
             default -> { }
@@ -643,8 +696,12 @@ public final class PeerProtocolServer implements AutoCloseable {
         long contentLength = parseContentLength(exchange.getRequestHeaders().getFirst("Content-Length"));
         if (contentLength != declaredSize) throw new IllegalArgumentException("HTTP content length does not match the signed filesystem-file length.");
         String member = exchange.getRequestHeaders().getFirst("X-PC-Node-ID");
+        if (!filesystemRequestAllowed(member, exchange)) return;
         Map<String, Object> stored = filesystem.write(member, decode(encodedRootId), relativePath,
                 exchange.getRequestBody(), declaredSize, declaredHash, overwrite, approvalId);
+        audit.record("FILESYSTEM_FILE_WRITTEN", member, "root=" + decode(encodedRootId)
+                + ", path=" + relativePath + ", size=" + declaredSize
+                + ", sha256=" + (declaredHash == null ? "" : declaredHash.toLowerCase(java.util.Locale.ROOT)));
         sendJson(exchange, 201, stored);
     }
 
@@ -1079,5 +1136,21 @@ public final class PeerProtocolServer implements AutoCloseable {
 
     private static String clientAddress(HttpExchange exchange) {
         return exchange.getRemoteAddress() == null ? "unknown" : exchange.getRemoteAddress().getAddress().getHostAddress();
+    }
+
+    private boolean filesystemRequestAllowed(String member, HttpExchange exchange) throws Exception {
+        if (security.requestAllowed("fs:" + member, RATE_FILESYSTEM_OPS_PER_MINUTE, 60)) return true;
+        sendJson(exchange, 429, Map.of("error", "Filesystem operations from this member are temporarily rate-limited."));
+        return false;
+    }
+
+    private static int envInt(String name, int fallback, int minimum, int maximum) {
+        String value = System.getenv(name);
+        if (value == null || value.isBlank()) return fallback;
+        try {
+            return Math.max(minimum, Math.min(maximum, Integer.parseInt(value.trim())));
+        } catch (NumberFormatException invalid) {
+            return fallback;
+        }
     }
 }

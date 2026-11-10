@@ -57,3 +57,5 @@ Preserve `data/` across source upgrades. It contains `node-id.txt`, `state.prope
 ```
 
 `DelegatedAdmissionIntegrationTest` covers delegated admission thresholds, approval attribution and rejection cases, certificate-chain hardening, revocation propagation and consent. `DesktopInteropTest` covers desktop↔Android approval, revocation and consent interoperability.
+
+M6 reliability coverage is split between `JsonLimitsTest`, `SecurityMonitorRequestLimitTest`, `ProtectionApprovalLimitTest`, `ReferenceVersionRetentionTest`, `StorageFaultInjectionTest`, `TransferQuotaTest` and presence assertions in `NetworkMembershipServiceTest`. The fault-injection tests model interrupted streams, digest mismatches, destination conflicts, persistence failure after file publication, restart recovery and cancelled snapshots. They do not simulate real disk-full, power-loss or filesystem-corruption behavior.

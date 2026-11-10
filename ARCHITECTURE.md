@@ -98,14 +98,18 @@ Network membership requires Android 13/API 33 or newer for the platform Ed25519 
 - Network membership is explicit and approval-gated.
 - Every node has its own signing key; private keys are not shared.
 - Signed requests bind method, path, timestamp, nonce and body digest.
+- Signed presence binds the advertised endpoint to the member key; unsigned legacy presence cannot move a certificate-bound endpoint.
 - Local administration is not exposed through the peer listener.
 - File operations enforce member grants, canonical paths, no-symlink rules and configured byte limits.
 - Downloads and managed uploads verify size and SHA-256 before finalization.
 - Deletion of shared referenced originals is permission-gated and snapshot-backed where supported.
+- JSON input, per-source request rates, pending approvals, transfer sessions, reserved staging and coordinated-ticket claims are bounded.
+- Eligible-filesystem mutations and sensitive authorization decisions produce owner-side audit records without logging file contents or credentials.
 
 ## 8. Known engineering limits
 
 - Android app framework source has not yet been built with the Android SDK/Gradle in this development environment.
 - The JNR-FUSE module compiled successfully against its external Maven dependency on Arch Linux on 2026-11-04. A real Linux-kernel mount and callback exercise remain unverified.
-- Transfer resume after abrupt process/device failure, long-duration/concurrency testing, performance profiling, a security audit, NAT/CGNAT diagnostics and final native UX refinement remain production-readiness work.
+- Transfer resume after abrupt process/device failure, long-duration/concurrency testing, performance profiling, a security audit, real disk-full/power-loss fault testing and final native UX refinement remain production-readiness work. The automated fault-injection suite uses deterministic software faults.
+- Tiered per-member filesystem quotas beyond the request-rate window and per-member TLS certificate pinning beyond signed endpoint binding are not yet implemented.
 - Direct connectivity can fail behind CGNAT or restrictive firewalls; no relay fallback is provided.

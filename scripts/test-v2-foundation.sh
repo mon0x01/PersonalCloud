@@ -33,8 +33,12 @@ for test in \
   dev.personalcloud.core.StateStoreMultiProcessTest \
   dev.personalcloud.core.StateStorePathSafetyTest \
   dev.personalcloud.core.FileServiceUploadAtomicityTest \
+  dev.personalcloud.core.SecurityMonitorRequestLimitTest \
   dev.personalcloud.core.VersionServiceTest \
+  dev.personalcloud.net.JsonLimitsTest \
   dev.personalcloud.storage.ReferenceStorageServiceTest \
+  dev.personalcloud.storage.ReferenceVersionRetentionTest \
+  dev.personalcloud.storage.StorageFaultInjectionTest \
   dev.personalcloud.storage.EligibleStorageServiceTest \
   dev.personalcloud.control.LocalControlClientTest \
   dev.personalcloud.storage.ReferenceFileSystemModelCacheTest \
@@ -50,8 +54,10 @@ for test in \
   dev.personalcloud.network.OutboundTransferQueueTest \
   dev.personalcloud.policy.FilesystemPolicyServiceTest \
   dev.personalcloud.policy.ProtectionApprovalServiceTest \
+  dev.personalcloud.policy.ProtectionApprovalLimitTest \
   dev.personalcloud.network.DirectConnectivityDiagnosticsTest \
-  dev.personalcloud.transfer.ResumableTransferManagerTest; do
+  dev.personalcloud.transfer.ResumableTransferManagerTest \
+  dev.personalcloud.transfer.TransferQuotaTest; do
   run_test "$test"
 done
 

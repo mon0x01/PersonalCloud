@@ -168,19 +168,37 @@ public final class ReferenceVersionService {
             }
         }
         snapshots.sort(Comparator.comparing(Snapshot::createdAt));
-        int samePath = 0;
-        long total = 0;
-        for (Snapshot snapshot : snapshots) total += snapshot.size();
-        for (int i = snapshots.size() - 1; i >= 0; i--) {
-            Snapshot snapshot = snapshots.get(i);
-            boolean same = snapshot.referenceId().equals(referenceId) && snapshot.path().equals(path);
-            if (same) samePath++;
-            if (samePath > MAX_VERSIONS_PER_PATH || snapshots.size() > MAX_TOTAL_VERSIONS || total > MAX_TOTAL_BYTES) {
+        // Retention must evict the oldest snapshots, never the newest ones. A
+        // previous implementation walked newest-first and could delete the
+        // recovery point that was just created while retaining older blobs.
+        java.util.Map<String, Integer> perPath = new java.util.LinkedHashMap<>();
+        for (Snapshot snapshot : snapshots) {
+            perPath.merge(snapshot.referenceId() + "\u0000" + snapshot.path(), 1, Integer::sum);
+        }
+        java.util.Set<Snapshot> removed = new java.util.HashSet<>();
+        for (Snapshot snapshot : snapshots) { // oldest first within each path
+            String key = snapshot.referenceId() + "\u0000" + snapshot.path();
+            int count = perPath.getOrDefault(key, 0);
+            if (count > MAX_VERSIONS_PER_PATH) {
                 Files.deleteIfExists(snapshot.blob());
                 Files.deleteIfExists(snapshot.metadata());
-                total -= snapshot.size();
-                snapshots.remove(i);
+                removed.add(snapshot);
+                perPath.put(key, count - 1);
             }
+        }
+        List<Snapshot> remaining = snapshots.stream()
+                .filter(snapshot -> !removed.contains(snapshot))
+                .sorted(Comparator.comparing(Snapshot::createdAt))
+                .toList();
+        long total = 0;
+        for (Snapshot snapshot : remaining) total += snapshot.size();
+        int totalCount = remaining.size();
+        for (Snapshot snapshot : remaining) { // oldest first
+            if (totalCount <= MAX_TOTAL_VERSIONS && total <= MAX_TOTAL_BYTES) break;
+            Files.deleteIfExists(snapshot.blob());
+            Files.deleteIfExists(snapshot.metadata());
+            totalCount--;
+            total -= snapshot.size();
         }
     }
 

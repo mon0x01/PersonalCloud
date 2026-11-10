@@ -3,6 +3,7 @@ package dev.personalcloud.control;
 import dev.personalcloud.net.Json;
 import dev.personalcloud.net.RemotePeerClient;
 import dev.personalcloud.core.AppConfig;
+import dev.personalcloud.core.AuditLog;
 import dev.personalcloud.core.GrantService;
 import dev.personalcloud.core.PeerService;
 import dev.personalcloud.storage.ReferenceRoot;
@@ -77,6 +78,7 @@ public final class LocalControlServer implements AutoCloseable {
     private final FilesystemPolicyService policy;
     private final ProtectionApprovalService approvals;
     private final EligibleStorageService filesystem;
+    private final AuditLog audit;
     private final OutboundTransferQueue outboundTransfers;
     private final CoordinatedTransferService coordinated;
     private final java.util.concurrent.ScheduledExecutorService transferRetryScheduler =
@@ -115,6 +117,7 @@ public final class LocalControlServer implements AutoCloseable {
         this.policy = policy;
         this.approvals = approvals;
         this.filesystem = filesystem;
+        this.audit = auditLog(dataDirectory);
         try {
             StateStore coordinatedState = new StateStore(config.dataDirectory());
             this.outboundTransfers = new OutboundTransferQueue(coordinatedState, membership,
@@ -335,21 +338,34 @@ public final class LocalControlServer implements AutoCloseable {
                         } finally { java.util.Arrays.fill(password, '\0'); }
                     }
                     case "network.requests" -> respond(output, responseStarted, Map.of("ok", true, "requests", membership.pendingRequests()));
-                    case "network.approve" -> respond(output, responseStarted, Map.of("ok", true,
-                            "request", membership.approve(string(request, "requestId"))));
-                    case "network.reject" -> respond(output, responseStarted, Map.of("ok", true,
-                            "request", membership.reject(string(request, "requestId"), optionalString(request, "reason", ""))));
+                    case "network.approve" -> {
+                        String requestId = string(request, "requestId");
+                        Map<String, Object> approved = membership.approve(requestId);
+                        recordAudit("MEMBER_ADMISSION_APPROVED", nodeId, "request=" + requestId);
+                        respond(output, responseStarted, Map.of("ok", true, "request", approved));
+                    }
+                    case "network.reject" -> {
+                        String requestId = string(request, "requestId");
+                        Map<String, Object> rejected = membership.reject(requestId, optionalString(request, "reason", ""));
+                        recordAudit("MEMBER_ADMISSION_REJECTED", nodeId, "request=" + requestId);
+                        respond(output, responseStarted, Map.of("ok", true, "request", rejected));
+                    }
                     case "reference-grants.list" -> respond(output, responseStarted, Map.of("ok", true, "grants", referenceGrants.listAll()));
                     case "reference-grants.create" -> {
                         String path = optionalString(request, "path", "");
                         if (".".equals(path) || "-".equals(path)) path = "";
-                        Map<String, Object> grant = referenceGrants.create(string(request, "memberId"),
-                                string(request, "referenceId"), path, string(request, "permission"));
+                        String memberId = string(request, "memberId");
+                        String referenceId = string(request, "referenceId");
+                        Map<String, Object> grant = referenceGrants.create(memberId,
+                                referenceId, path, string(request, "permission"));
+                        recordAudit("REFERENCE_GRANT_CREATED", memberId, "reference=" + referenceId
+                                + ", path=" + path + ", permission=" + string(request, "permission"));
                         respond(output, responseStarted, Map.of("ok", true, "grant", grant));
                     }
                     case "reference-grants.revoke" -> {
                         String grantId = string(request, "grantId");
                         referenceGrants.revoke(grantId);
+                        recordAudit("REFERENCE_GRANT_REVOKED", nodeId, "grant=" + grantId);
                         respond(output, responseStarted, Map.of("ok", true, "grantId", grantId));
                     }
                     case "reference-snapshots.list" -> respond(output, responseStarted, Map.of("ok", true, "snapshots", referenceVersions.list()));
@@ -493,6 +509,7 @@ public final class LocalControlServer implements AutoCloseable {
                     case "network.revoke" -> {
                         String memberId = string(request, "nodeId");
                         membership.revokeMember(memberId);
+                        recordAudit("MEMBER_REVOKED", nodeId, "member=" + memberId);
                         respond(output, responseStarted, Map.of("ok", true, "nodeId", memberId, "status", "REVOKED"));
                     }
                     case "grants.list" -> respond(output, responseStarted, Map.of("ok", true, "grants", grants.listAll()));
@@ -558,6 +575,7 @@ public final class LocalControlServer implements AutoCloseable {
                         if (Boolean.TRUE.equals(membership.status().get("joined"))) {
                             membership.recordFilesystemConsent(true);
                         }
+                        recordAudit("FILESYSTEM_CONSENT_GRANTED", nodeId, "broad eligible-storage access enabled");
                         respond(output, responseStarted, Map.of("ok", true, "filesystem", granted));
                     }
                     case "filesystem.revoke-consent" -> {
@@ -565,6 +583,7 @@ public final class LocalControlServer implements AutoCloseable {
                         if (Boolean.TRUE.equals(membership.status().get("joined"))) {
                             membership.recordFilesystemConsent(false);
                         }
+                        recordAudit("FILESYSTEM_CONSENT_REVOKED", nodeId, "broad eligible-storage access disabled");
                         respond(output, responseStarted, Map.of("ok", true, "filesystem", revoked));
                     }
                     case "filesystem.remote.roots" -> {
@@ -931,6 +950,20 @@ public final class LocalControlServer implements AutoCloseable {
     }
     private static String safeMessage(Exception failure) {
         return failure.getMessage() == null ? failure.getClass().getSimpleName() : failure.getMessage();
+    }
+
+    private void recordAudit(String event, String actor, String detail) {
+        if (audit != null) audit.record(event, actor, detail);
+    }
+
+    private static AuditLog auditLog(Path dataDirectory) {
+        try {
+            return new AuditLog(dataDirectory);
+        } catch (Exception unavailable) {
+            // Audit is best effort at the control boundary; the protocol server
+            // keeps its own instance and the owner-only log remains optional.
+            return null;
+        }
     }
 
     @Override public synchronized void close() {

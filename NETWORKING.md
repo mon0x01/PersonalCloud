@@ -50,7 +50,13 @@ After enrollment, each request is signed by the device's Ed25519 key. The signat
 
 Member requests are checked against the local network identity, the signed certificate chain (including root, issuer ordering, duplicate identities and revoked links), active/revoked status, timestamp freshness, nonce replay state and request signature before dispatch. Revocation records are signed and monotonic; stale catalogues cannot reactivate a revoked member.
 
+Per-source request windows bound ordinary peer traffic and the enrollment challenge/submission routes; authenticated filesystem operations also have a per-member window. Defaults are 600 requests, 30 challenges, 12 enrollment submissions and 300 filesystem operations per minute; override them with `PERSONALCLOUD_RATE_LIMIT_REQUESTS_PER_MINUTE`, `PERSONALCLOUD_RATE_LIMIT_CHALLENGES_PER_MINUTE`, `PERSONALCLOUD_RATE_LIMIT_ENROLLMENTS_PER_MINUTE` and `PERSONALCLOUD_RATE_LIMIT_FILESYSTEM_OPS_PER_MINUTE`.
+
+`GET /network/presence` returns an Ed25519-signed presence record bound to the member certificate and advertised endpoint. Synchronizing peers verify the signature. Legacy unsigned presence remains accepted only when the endpoint still equals both the connected endpoint and the certificate-bound endpoint, so an unsigned response cannot move a member endpoint. Endpoint validation rejects credentials, query/fragment data, oversized hosts, and wildcard, link-local or multicast IP literals; loopback and private-LAN peers remain supported.
+
 Catalogue synchronization is bounded-concurrent (at most four peers at a time). Android does not hold its membership-state monitor during outbound peer requests, so one unreachable peer cannot block inbound member authentication or local membership controls. A member's online flag is a 90-second direct-heartbeat lease; persisted flags expire after downtime and stale catalogue snapshots do not overwrite a newer local heartbeat. This is a liveness indicator, not a guarantee that the next file transfer will succeed.
+
+Resumable sessions are bounded to 16 active sessions per node and 4 per member by default (`PERSONALCLOUD_MAX_TRANSFER_SESSIONS`, `PERSONALCLOUD_MAX_TRANSFER_SESSIONS_PER_MEMBER`). Aggregate and per-member staging reservations default to twice the configured per-file limit and can be overridden with `PERSONALCLOUD_MAX_TRANSFER_STAGING_BYTES` and `PERSONALCLOUD_MAX_TRANSFER_STAGING_BYTES_PER_MEMBER`. Pending protection approvals are bounded to 32 per member and 256 per node. These bounds fail closed with a 409 response.
 
 ## Direct connectivity and bind address
 

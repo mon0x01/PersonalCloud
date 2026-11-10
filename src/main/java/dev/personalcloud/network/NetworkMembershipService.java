@@ -979,12 +979,98 @@ public final class NetworkMembershipService {
         java.net.URI uri;
         try { uri = java.net.URI.create(endpoint); }
         catch (Exception invalid) { throw new IllegalArgumentException("Peer endpoint is invalid."); }
-        if (uri.getHost() == null || uri.getUserInfo() != null || uri.getRawQuery() != null || uri.getRawFragment() != null || uri.getPort() < 1 || uri.getPort() > 65535) {
+        if (uri.getHost() == null || uri.getHost().length() > 253
+                || uri.getUserInfo() != null || uri.getRawQuery() != null || uri.getRawFragment() != null
+                || uri.getPort() < 1 || uri.getPort() > 65535) {
             throw new IllegalArgumentException("Peer endpoint must contain a host and valid port, without credentials or query parameters.");
         }
-        if (!"https".equalsIgnoreCase(uri.getScheme()) && !("http".equalsIgnoreCase(uri.getScheme()) && java.net.InetAddress.getByName(uri.getHost()).isLoopbackAddress())) {
+        if (!"https".equalsIgnoreCase(uri.getScheme())
+                && !("http".equalsIgnoreCase(uri.getScheme())
+                        && java.net.InetAddress.getByName(uri.getHost()).isLoopbackAddress())) {
             throw new SecurityException("Non-loopback PersonalCloud endpoints must use HTTPS.");
         }
+        // Reject address families that are never a valid direct peer target and
+        // would otherwise turn an advertised endpoint into an SSRF pivot.
+        if (isIpLiteral(uri.getHost())) {
+            java.net.InetAddress address = java.net.InetAddress.getByName(uri.getHost());
+            if (address.isAnyLocalAddress() || address.isLinkLocalAddress() || address.isMulticastAddress()) {
+                throw new SecurityException("Peer endpoints cannot point at wildcard, link-local or multicast addresses.");
+            }
+        }
+    }
+
+    private static boolean isIpLiteral(String host) {
+        return host.indexOf(':') >= 0 || host.matches("[0-9.]+");
+    }
+
+    /** Signed presence binds an endpoint to the member key, not just the TLS connection. */
+    public synchronized Map<String, Object> signedPresence() throws Exception {
+        Map<String, String> network = requireNetwork();
+        Map<String, Object> presence = new LinkedHashMap<>();
+        presence.put("presenceVersion", "personalcloud-presence/1");
+        presence.put("networkId", network.get("networkId"));
+        presence.put("nodeId", config.nodeId());
+        presence.put("nodeName", config.nodeName());
+        presence.put("endpoint", localEndpointForProtocol());
+        presence.put("online", true);
+        presence.put("time", Instant.now().toString());
+        presence.put("signature", Base64.getEncoder().encodeToString(
+                identity.sign(presenceBytes(presence))));
+        return presence;
+    }
+
+    /**
+     * Verifies a presence response against the expected member certificate. A
+     * signed response may advertise a moved endpoint. Legacy unsigned responses
+     * are accepted only for the unchanged endpoint already bound to the member.
+     */
+    public synchronized Map<String, Object> verifyPresence(Map<String, Object> presence,
+                                                           String expectedNodeId,
+                                                           String connectedEndpoint) throws Exception {
+        Map<String, String> network = requireNetwork();
+        if (!expectedNodeId.equals(text(presence, "nodeId"))
+                || !network.get("networkId").equals(text(presence, "networkId"))) {
+            throw new SecurityException("Peer presence is bound to a different network or member.");
+        }
+        String endpoint = text(presence, "endpoint");
+        validateEndpoint(endpoint);
+        Map<String, String> member = store.getRecord("member", expectedNodeId);
+        if (member == null || !"ACTIVE".equals(member.getOrDefault("status", "ACTIVE"))) {
+            throw new SecurityException("Peer presence is from an unknown or inactive member.");
+        }
+        MembershipCertificate.CertificateInfo info = MembershipCertificate.verify(member.get("certificate"));
+        String signature = stringValue(presence.get("signature"));
+        if (!signature.isBlank()) {
+            byte[] decoded;
+            try { decoded = Base64.getDecoder().decode(signature); }
+            catch (IllegalArgumentException invalid) { throw new SecurityException("Peer presence signature is not valid base64."); }
+            if (!DeviceIdentity.verify(info.publicKey(), presenceBytes(presence), decoded)) {
+                throw new SecurityException("Peer presence signature is invalid.");
+            }
+            // A captured signed presence must not remain usable indefinitely.
+            Instant issued;
+            try { issued = Instant.parse(text(presence, "time")); }
+            catch (Exception invalid) { throw new SecurityException("Peer presence timestamp is invalid."); }
+            long now = Instant.now().getEpochSecond();
+            if (issued.getEpochSecond() < now - AUTH_CLOCK_SKEW_SECONDS
+                    || issued.getEpochSecond() > now + AUTH_CLOCK_SKEW_SECONDS) {
+                throw new SecurityException("Peer presence is stale or outside the permitted clock skew.");
+            }
+        } else {
+            // Older peers do not sign presence. They may not move the endpoint
+            // that the member certificate already binds.
+            String connected = connectedEndpoint == null ? "" : connectedEndpoint.trim();
+            if (!endpoint.equals(connected) || !endpoint.equals(info.endpoint())) {
+                throw new SecurityException("An unsigned peer presence may not change the member endpoint.");
+            }
+        }
+        return presence;
+    }
+
+    private static byte[] presenceBytes(Map<String, Object> presence) {
+        Map<String, Object> body = new LinkedHashMap<>(presence);
+        body.remove("signature");
+        return Json.stringify(body).getBytes(StandardCharsets.UTF_8);
     }
 
     private record Challenge(String nonce, Instant expiresAt) { }
