@@ -79,6 +79,7 @@ public final class PersonalCloudCli {
             case "coordinated" -> coordinated(client, args, start);
             case "policy" -> policy(client, args, start);
             case "filesystem" -> filesystem(client, args, start);
+            case "audit" -> audit(client, args, start);
             default -> throw new IllegalArgumentException("Unknown command: " + command);
         }
     }
@@ -323,14 +324,39 @@ public final class PersonalCloudCli {
     }
 
     private static void filesystem(LocalControlClient client, String[] args, int start) throws Exception {
-        if (start >= args.length) throw new IllegalArgumentException("Expected filesystem status, roots, consent or revoke-consent.");
+        if (start >= args.length) throw new IllegalArgumentException("Expected filesystem status, roots, consent, revoke-consent, budgets, budget, budget-set or budget-clear.");
         switch (args[start++]) {
             case "status" -> print(client.filesystemStatus());
             case "roots" -> client.filesystemRoots().forEach(PersonalCloudCli::print);
             case "consent" -> print(client.grantFilesystemConsent());
             case "revoke-consent" -> print(client.revokeFilesystemConsent());
+            case "budgets" -> client.listFilesystemBudgets().forEach(PersonalCloudCli::print);
+            case "budget" -> {
+                requireCount(args, start, 1, 1, "filesystem budget <member-id>");
+                print(client.filesystemBudget(args[start]));
+            }
+            case "budget-set" -> {
+                requireCount(args, start, 3, 3, "filesystem budget-set <member-id> <write-bytes-per-day> <delete-entries-per-day>");
+                print(client.setFilesystemBudget(args[start], Long.parseLong(args[start + 1]),
+                        Long.parseLong(args[start + 2])));
+            }
+            case "budget-clear" -> {
+                requireCount(args, start, 1, 1, "filesystem budget-clear <member-id>");
+                print(client.clearFilesystemBudget(args[start]));
+            }
             default -> throw new IllegalArgumentException("Unknown filesystem command.");
         }
+    }
+
+    private static void audit(LocalControlClient client, String[] args, int start) throws Exception {
+        int index = start;
+        if (index < args.length && "list".equals(args[index])) index++;
+        int limit = 50;
+        if (index < args.length) {
+            if (index + 1 != args.length) throw new IllegalArgumentException("Usage: audit [list] [limit]");
+            limit = Integer.parseInt(args[index]);
+        }
+        client.listAuditEvents(limit).forEach(PersonalCloudCli::print);
     }
 
     private static void network(LocalControlClient client, String[] args, int start) throws Exception {
@@ -554,6 +580,17 @@ public final class PersonalCloudCli {
                 + "  network members\n"
                 + "  network sync\n"
                 + "  network revoke <node-id>\n\n"
+                + "Eligible filesystem and member budgets:\n"
+                + "  filesystem status\n"
+                + "  filesystem roots\n"
+                + "  filesystem consent\n"
+                + "  filesystem revoke-consent\n"
+                + "  filesystem budgets\n"
+                + "  filesystem budget <member-id>\n"
+                + "  filesystem budget-set <member-id> <write-bytes-per-day> <delete-entries-per-day>\n"
+                + "  filesystem budget-clear <member-id>\n\n"
+                + "Owner audit history:\n"
+                + "  audit [list] [limit]\n\n"
                 + "Referenced storage permissions:\n"
                 + "  reference-grants list\n"
                 + "  reference-grants create <member-node-id> <reference-id> <relative-path-or-.> <DOWNLOAD|DOWNLOAD+DELETE>\n"

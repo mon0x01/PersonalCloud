@@ -141,6 +141,20 @@ public final class LocalControlClientTest {
             check(Boolean.TRUE.equals(client.removePolicy(rootId, "Research").get("removed")),
                     "policy removal must report the removed rule");
 
+            Map<String, Object> budget = client.setFilesystemBudget("node-test-id", 4096, 7);
+            check(((Number) budget.get("writeBytesPerDay")).longValue() == 4096
+                            && ((Number) budget.get("deleteEntriesPerDay")).longValue() == 7,
+                    "local control must persist per-member filesystem budget overrides");
+            check(((Number) client.filesystemBudget("node-test-id").get("writeBytesPerDay")).longValue() == 4096,
+                    "local control must report the effective member budget");
+            check(client.listFilesystemBudgets().stream().anyMatch(row ->
+                            "node-test-id".equals(row.get("memberId"))),
+                    "local control must list member budget usage and overrides");
+            check(client.listAuditEvents(20).stream().anyMatch(row ->
+                            "FILESYSTEM_BUDGET_UPDATED".equals(row.get("event"))),
+                    "budget changes must produce owner-visible audit records");
+            client.clearFilesystemBudget("node-test-id");
+
             // Duplicate startup must not unlink or replace the original process's socket.
             LocalControlServer duplicate = new LocalControlServer(data, config.nodeId(), config.nodeName(), storage, config, peers, grants);
             try {

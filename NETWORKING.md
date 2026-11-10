@@ -58,6 +58,8 @@ Catalogue synchronization is bounded-concurrent (at most four peers at a time). 
 
 Resumable sessions are bounded to 16 active sessions per node and 4 per member by default (`PERSONALCLOUD_MAX_TRANSFER_SESSIONS`, `PERSONALCLOUD_MAX_TRANSFER_SESSIONS_PER_MEMBER`). Aggregate and per-member staging reservations default to twice the configured per-file limit and can be overridden with `PERSONALCLOUD_MAX_TRANSFER_STAGING_BYTES` and `PERSONALCLOUD_MAX_TRANSFER_STAGING_BYTES_PER_MEMBER`. Pending protection approvals are bounded to 32 per member and 256 per node. These bounds fail closed with a 409 response.
 
+Each member also has durable daily filesystem budgets: 20 GiB of written bytes and 10,000 deleted entries per UTC day. Override the node defaults with `PERSONALCLOUD_MEMBER_DAILY_WRITE_BYTES` and `PERSONALCLOUD_MEMBER_DAILY_DELETE_ENTRIES` (`0` means unlimited), or use `personalcloudctl filesystem budget-set` for one member. An exhausted budget is rejected with HTTP `429` and a bounded `Retry-After`; the owner-side audit log records the event.
+
 ## Direct connectivity and bind address
 
 The node defaults to loopback for safety. Set `PERSONALCLOUD_BIND_ADDRESS` to a reachable interface address for direct peer connections. The endpoint advertised to peers must be reachable from those peers, and its TLS certificate SAN must match the host/IP in the endpoint URL.
@@ -110,6 +112,8 @@ Environment variables:
 | `PERSONALCLOUD_TLS_KEYSTORE_PASSWORD` | Identity password |
 | `PERSONALCLOUD_TLS_TRUSTSTORE` | Optional PKCS#12 trust store for outgoing connections |
 | `PERSONALCLOUD_TLS_TRUSTSTORE_PASSWORD` | Trust-store password |
+| `PERSONALCLOUD_MEMBER_DAILY_WRITE_BYTES` | Default per-member daily write-byte budget (`0` = unlimited) |
+| `PERSONALCLOUD_MEMBER_DAILY_DELETE_ENTRIES` | Default per-member daily delete-entry budget (`0` = unlimited) |
 
 ## Transfer semantics
 

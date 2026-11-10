@@ -570,6 +570,28 @@ public final class LocalControlServer implements AutoCloseable {
                             "filesystem", filesystem.status()));
                     case "filesystem.roots" -> respond(output, responseStarted, Map.of("ok", true,
                             "roots", filesystem.rootsForOwner()));
+                    case "filesystem.budgets" -> respond(output, responseStarted, Map.of("ok", true,
+                            "budgets", filesystem.budgetStatuses()));
+                    case "filesystem.budget" -> respond(output, responseStarted, Map.of("ok", true,
+                            "budget", filesystem.budgetStatus(string(request, "memberId"))));
+                    case "filesystem.budget-set" -> {
+                        String memberId = string(request, "memberId");
+                        Map<String, Object> budget = filesystem.setMemberBudget(memberId,
+                                longValue(request, "writeBytesPerDay", 0),
+                                longValue(request, "deleteEntriesPerDay", 0));
+                        recordAudit("FILESYSTEM_BUDGET_UPDATED", nodeId, "member=" + memberId
+                                + ", writeBytesPerDay=" + budget.get("writeBytesPerDay")
+                                + ", deleteEntriesPerDay=" + budget.get("deleteEntriesPerDay"));
+                        respond(output, responseStarted, Map.of("ok", true, "budget", budget));
+                    }
+                    case "filesystem.budget-clear" -> {
+                        String memberId = string(request, "memberId");
+                        Map<String, Object> budget = filesystem.clearMemberBudget(memberId);
+                        recordAudit("FILESYSTEM_BUDGET_CLEARED", nodeId, "member=" + memberId);
+                        respond(output, responseStarted, Map.of("ok", true, "budget", budget));
+                    }
+                    case "audit.list" -> respond(output, responseStarted, Map.of("ok", true,
+                            "events", audit == null ? List.of() : audit.recent(integer(request, "limit", 50))));
                     case "filesystem.consent" -> {
                         Map<String, Object> granted = filesystem.grantConsent();
                         if (Boolean.TRUE.equals(membership.status().get("joined"))) {

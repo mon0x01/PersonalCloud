@@ -94,6 +94,10 @@ The node creates an owner-only Unix-domain socket at `<PERSONALCLOUD_DATA_DIR>/c
 ./integrations/linux/personalcloudctl reference-grants create MEMBER_ID REFERENCE_ID . DOWNLOAD
 ./integrations/linux/personalcloudctl managed place DESTINATION_NODE_ID source.bin backups/source.bin
 ./integrations/linux/personalcloudctl network search report
+./integrations/linux/personalcloudctl filesystem budgets
+./integrations/linux/personalcloudctl filesystem budget MEMBER_ID
+./integrations/linux/personalcloudctl filesystem budget-set MEMBER_ID 21474836480 10000
+./integrations/linux/personalcloudctl audit list 50
 ```
 
 Network bootstrap and join prompt for passwords through the terminal without echoing them. See `integrations/linux/README.md` for the complete CLI.

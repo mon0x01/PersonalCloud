@@ -32,6 +32,10 @@ The local control socket is `<PERSONALCLOUD_DATA_DIR>/control.sock`, owner-only.
 ./integrations/linux/personalcloudctl references add "Documents" "$HOME/Documents"
 ./integrations/linux/personalcloudctl browse REFERENCE_ID
 ./integrations/linux/personalcloudctl search report
+./integrations/linux/personalcloudctl filesystem budgets
+./integrations/linux/personalcloudctl filesystem budget MEMBER_ID
+./integrations/linux/personalcloudctl filesystem budget-set MEMBER_ID 21474836480 10000
+./integrations/linux/personalcloudctl audit list 50
 ```
 
 ## Existing runtime state
@@ -46,6 +50,7 @@ Preserve `data/` across source upgrades. It contains `node-id.txt`, `state.prope
 - Approvals are now signed `AdmissionApproval` records. Legacy approval results without the record remain accepted for compatibility, but new peers verify the signed record and reject replayed or expired approvals.
 - Revocation now includes a signed `MembershipRevocation` record. Legacy unsigned `REVOKED` catalogue status remains accepted, but new peers validate signed records when present and keep revocation monotonic.
 - Legacy `/node/*` token routes remain available for the compatibility period.
+- Per-member filesystem budgets default to 20 GiB written and 10,000 deleted entries per UTC day. Set `PERSONALCLOUD_MEMBER_DAILY_WRITE_BYTES` or `PERSONALCLOUD_MEMBER_DAILY_DELETE_ENTRIES` to change the node defaults (`0` means unlimited), or use `filesystem budget-set <member-id> <write-bytes-per-day> <delete-entries-per-day>` for one member. Existing usage lives in `state.properties` keys beginning with `filesystem.budget.` and follows the normal state backup/restore process.
 
 ## Tests
 
@@ -59,3 +64,5 @@ Preserve `data/` across source upgrades. It contains `node-id.txt`, `state.prope
 `DelegatedAdmissionIntegrationTest` covers delegated admission thresholds, approval attribution and rejection cases, certificate-chain hardening, revocation propagation and consent. `DesktopInteropTest` covers desktop↔Android approval, revocation and consent interoperability.
 
 M6 reliability coverage is split between `JsonLimitsTest`, `SecurityMonitorRequestLimitTest`, `ProtectionApprovalLimitTest`, `ReferenceVersionRetentionTest`, `StorageFaultInjectionTest`, `TransferQuotaTest` and presence assertions in `NetworkMembershipServiceTest`. The fault-injection tests model interrupted streams, digest mismatches, destination conflicts, persistence failure after file publication, restart recovery and cancelled snapshots. They do not simulate real disk-full, power-loss or filesystem-corruption behavior.
+
+M7 coverage is split between `FilesystemBudgetTest` (limit enforcement, per-member isolation, restart persistence, overrides, failed-write release, recursive-delete preflight and UTC-day rollover), `AuditLogConcurrencyTest` (concurrent instances, rotation, malformed lines and symlink rejection), plus budget/audit assertions in `LocalControlClientTest` and remote over-budget rejection in `EligibleStorageIntegrationTest`. Real disk-full/power-loss behavior, per-member TLS pinning, physical-device acceptance and an independent security audit remain outstanding.

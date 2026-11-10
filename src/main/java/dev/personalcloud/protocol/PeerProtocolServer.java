@@ -20,6 +20,7 @@ import dev.personalcloud.storage.ReferenceVersionService;
 import dev.personalcloud.storage.StorageEntry;
 import dev.personalcloud.storage.ManagedStorageService;
 import dev.personalcloud.storage.EligibleStorageService;
+import dev.personalcloud.storage.FilesystemBudgetExceededException;
 import dev.personalcloud.policy.ApprovalRequiredException;
 import dev.personalcloud.policy.FilesystemPolicyService;
 import dev.personalcloud.policy.PolicyOperation;
@@ -272,6 +273,18 @@ public final class PeerProtocolServer implements AutoCloseable {
                     sendJson(exchange, 403, Map.of("error", approval.getMessage(), "approvalRequired", true,
                             "rootId", approval.rootId(), "path", approval.path(),
                             "operation", approval.operation().name()));
+                    return;
+                }
+                if (failure instanceof FilesystemBudgetExceededException budget) {
+                    exchange.getResponseHeaders().set("Retry-After",
+                            Long.toString(budget.retryAfterSeconds()));
+                    if (audit != null) audit.record("FILESYSTEM_BUDGET_EXCEEDED", budget.memberId(),
+                            "budget=" + budget.budget() + ", limit=" + budget.limit()
+                                    + ", used=" + budget.used() + ", reserved=" + budget.reserved()
+                                    + ", requested=" + budget.requested());
+                    sendJson(exchange, 429, Map.of("error", budget.getMessage(),
+                            "budget", budget.budget(), "retryAfterSeconds", budget.retryAfterSeconds(),
+                            "limit", budget.limit(), "used", budget.used(), "requested", budget.requested()));
                     return;
                 }
                 int status = failure instanceof RangeNotSatisfiableException ? 416

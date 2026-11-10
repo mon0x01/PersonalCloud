@@ -53,6 +53,7 @@ public final class EligibleStorageService {
     private final ProtectionApprovalService approvals;
     private final List<EligibleRoot> roots;
     private final List<Path> excluded;
+    private final FilesystemBudgetService budgets;
 
     public EligibleStorageService(AppConfig config, StateStore state, FilesystemPolicyService policy,
                                   ProtectionApprovalService approvals) {
@@ -61,10 +62,17 @@ public final class EligibleStorageService {
 
     public EligibleStorageService(AppConfig config, StateStore state, FilesystemPolicyService policy,
                                   ProtectionApprovalService approvals, List<Path> suppliedRoots) {
+        this(config, state, policy, approvals, suppliedRoots, new FilesystemBudgetService(state));
+    }
+
+    public EligibleStorageService(AppConfig config, StateStore state, FilesystemPolicyService policy,
+                                  ProtectionApprovalService approvals, List<Path> suppliedRoots,
+                                  FilesystemBudgetService budgets) {
         this.config = config;
         this.state = state;
         this.policy = policy;
         this.approvals = approvals;
+        this.budgets = budgets;
         this.roots = buildRoots(suppliedRoots);
         this.excluded = buildExclusions();
     }
@@ -102,6 +110,27 @@ public final class EligibleStorageService {
     public List<Map<String, Object>> rootsForMember() {
         requireConsent();
         return roots.stream().map(EligibleRoot::toRemoteMap).toList();
+    }
+
+    /** Current-day budgets and effective limits for one member. */
+    public Map<String, Object> budgetStatus(String memberId) {
+        return budgets.status(memberId);
+    }
+
+    /** Current-day budgets for every member with usage or a per-member override. */
+    public List<Map<String, Object>> budgetStatuses() {
+        return budgets.statuses();
+    }
+
+    /** Sets per-member daily write-byte and delete-entry overrides. */
+    public Map<String, Object> setMemberBudget(String memberId, long writeBytesPerDay,
+                                               long deleteEntriesPerDay) throws Exception {
+        return budgets.setPolicy(memberId, writeBytesPerDay, deleteEntriesPerDay);
+    }
+
+    /** Removes per-member overrides and restores node defaults. */
+    public Map<String, Object> clearMemberBudget(String memberId) throws Exception {
+        return budgets.clearPolicy(memberId);
     }
 
     public List<Map<String, Object>> list(String memberId, String rootId, String relativePath) throws Exception {
@@ -205,7 +234,6 @@ public final class EligibleStorageService {
         }
         Path target = resolve(root, path, false);
         boolean exists = Files.exists(target, LinkOption.NOFOLLOW_LINKS);
-        BasicFileAttributes before = null;
         if (exists) {
             if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) {
                 throw new IllegalArgumentException("The destination is not a regular file.");
@@ -220,76 +248,96 @@ public final class EligibleStorageService {
                 return result;
             }
             if (!overwrite) throw new IllegalStateException("The destination already exists; overwrite was not authorized.");
-            if (!coordinated) authorize(memberId, root, path, PolicyOperation.WRITE, approvalId);
-            before = Files.readAttributes(target, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-        } else {
-            if (!coordinated) authorize(memberId, root, path, PolicyOperation.CREATE, approvalId);
         }
 
-        Path parent = target.getParent();
-        Path realParent = parent.toRealPath();
-        Path realTarget = realParent.resolve(target.getFileName());
-        if (!realParent.startsWith(root.realPath()) || isExcluded(realTarget)) {
-            throw new SecurityException("The destination is outside eligible storage.");
-        }
-        if (exists) {
-            if (!target.toRealPath().equals(realTarget)) {
-                throw new SecurityException("The destination changed while the upload was being prepared.");
-            }
-        } else if (Files.exists(realTarget, LinkOption.NOFOLLOW_LINKS)) {
-            throw new IllegalStateException("The destination appeared while the upload was being prepared.");
-        }
-        Path temporary = Files.createTempFile(realParent, ".personalcloud-fs-upload-", ".part");
-        SecretFiles.restrict(temporary);
+        // Reserve before authorization so a denied or over-budget request never
+        // consumes a single-use owner approval. The reservation is released on
+        // every failure path before publication.
+        FilesystemBudgetService.Reservation reservation = budgets.reserveWrite(memberId, declaredSize);
+        boolean budgetCommitted = false;
         try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            long copied = 0;
-            byte[] buffer = new byte[128 * 1024];
-            try (OutputStream output = Files.newOutputStream(temporary, StandardOpenOption.TRUNCATE_EXISTING,
-                    StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
-                int read;
-                while ((read = content.read(buffer)) != -1) {
-                    copied = Math.addExact(copied, read);
-                    if (copied > declaredSize || copied > config.maxFileBytes()) {
-                        throw new IllegalArgumentException("The upload exceeded its declared or permitted size.");
-                    }
-                    digest.update(buffer, 0, read);
-                    output.write(buffer, 0, read);
-                }
-                output.flush();
+            BasicFileAttributes before = null;
+            if (exists) {
+                if (!coordinated) authorize(memberId, root, path, PolicyOperation.WRITE, approvalId);
+                before = Files.readAttributes(target, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+            } else {
+                if (!coordinated) authorize(memberId, root, path, PolicyOperation.CREATE, approvalId);
             }
-            if (copied != declaredSize) throw new IllegalArgumentException("The upload did not match its declared size.");
-            String actualHash = HexFormat.of().formatHex(digest.digest());
-            if (declaredSha256 != null && !declaredSha256.isBlank()
-                    && !MessageDigest.isEqual(declaredSha256.toLowerCase(java.util.Locale.ROOT)
-                    .getBytes(StandardCharsets.US_ASCII), actualHash.getBytes(StandardCharsets.US_ASCII))) {
-                throw new SecurityException("The upload failed SHA-256 integrity verification.");
-            }
-            if (before != null && sourceChanged(realTarget, before)) {
-                throw new SecurityException("The destination changed while the upload was in progress.");
+
+            Path parent = target.getParent();
+            Path realParent = parent.toRealPath();
+            Path realTarget = realParent.resolve(target.getFileName());
+            if (!realParent.startsWith(root.realPath()) || isExcluded(realTarget)) {
+                throw new SecurityException("The destination is outside eligible storage.");
             }
             if (exists) {
-                try {
-                    Files.move(temporary, realTarget, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-                } catch (AtomicMoveNotSupportedException fallback) {
-                    Files.move(temporary, realTarget, StandardCopyOption.REPLACE_EXISTING);
+                if (!target.toRealPath().equals(realTarget)) {
+                    throw new SecurityException("The destination changed while the upload was being prepared.");
                 }
-            } else {
-                try {
-                    // createLink is atomic create-if-absent; Files.move may replace a
-                    // racing destination on some providers.
-                    Files.createLink(realTarget, temporary);
-                } catch (FileAlreadyExistsException raced) {
-                    throw new IllegalStateException("The destination appeared during the upload; nothing was overwritten.", raced);
+            } else if (Files.exists(realTarget, LinkOption.NOFOLLOW_LINKS)) {
+                throw new IllegalStateException("The destination appeared while the upload was being prepared.");
+            }
+            Path temporary = Files.createTempFile(realParent, ".personalcloud-fs-upload-", ".part");
+            SecretFiles.restrict(temporary);
+            try {
+                MessageDigest digest = MessageDigest.getInstance("SHA-256");
+                long copied = 0;
+                byte[] buffer = new byte[128 * 1024];
+                try (OutputStream output = Files.newOutputStream(temporary, StandardOpenOption.TRUNCATE_EXISTING,
+                        StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
+                    int read;
+                    while ((read = content.read(buffer)) != -1) {
+                        copied = Math.addExact(copied, read);
+                        if (copied > declaredSize || copied > config.maxFileBytes()) {
+                            throw new IllegalArgumentException("The upload exceeded its declared or permitted size.");
+                        }
+                        digest.update(buffer, 0, read);
+                        output.write(buffer, 0, read);
+                    }
+                    output.flush();
                 }
+                if (copied != declaredSize) throw new IllegalArgumentException("The upload did not match its declared size.");
+                String actualHash = HexFormat.of().formatHex(digest.digest());
+                if (declaredSha256 != null && !declaredSha256.isBlank()
+                        && !MessageDigest.isEqual(declaredSha256.toLowerCase(java.util.Locale.ROOT)
+                        .getBytes(StandardCharsets.US_ASCII), actualHash.getBytes(StandardCharsets.US_ASCII))) {
+                    throw new SecurityException("The upload failed SHA-256 integrity verification.");
+                }
+                if (before != null && sourceChanged(realTarget, before)) {
+                    throw new SecurityException("The destination changed while the upload was in progress.");
+                }
+                // Settle immediately before publication. A publication failure
+                // after this point conservatively consumes the budget.
+                budgets.commitWrite(reservation);
+                budgetCommitted = true;
+                if (exists) {
+                    try {
+                        Files.move(temporary, realTarget, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+                    } catch (AtomicMoveNotSupportedException fallback) {
+                        Files.move(temporary, realTarget, StandardCopyOption.REPLACE_EXISTING);
+                    }
+                } else {
+                    try {
+                        // createLink is atomic create-if-absent; Files.move may replace a
+                        // racing destination on some providers.
+                        Files.createLink(realTarget, temporary);
+                    } catch (FileAlreadyExistsException raced) {
+                        throw new IllegalStateException("The destination appeared during the upload; nothing was overwritten.", raced);
+                    }
+                    Files.deleteIfExists(temporary);
+                }
+                BasicFileAttributes after = Files.readAttributes(realTarget, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+                Map<String, Object> result = entry(root, path, realTarget.getFileName().toString(), after);
+                result.put("sha256", actualHash);
+                return result;
+            } finally {
                 Files.deleteIfExists(temporary);
             }
-            BasicFileAttributes after = Files.readAttributes(realTarget, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-            Map<String, Object> result = entry(root, path, realTarget.getFileName().toString(), after);
-            result.put("sha256", actualHash);
-            return result;
         } finally {
-            Files.deleteIfExists(temporary);
+            if (!budgetCommitted) {
+                try { budgets.releaseWrite(reservation); }
+                catch (Exception ignored) { /* A leaked reservation stays fail-closed. */ }
+            }
         }
     }
 
@@ -399,6 +447,25 @@ public final class EligibleStorageService {
         boolean directory = Files.isDirectory(target, LinkOption.NOFOLLOW_LINKS);
         if (recursive && directory) {
             ensureNoSensitiveDescendants(root, target, path);
+        }
+        long entries = 1;
+        if (recursive && directory) {
+            entries = 0;
+            long limit = budgets.deleteLimit(memberId);
+            try (var paths = Files.walk(target)) {
+                var iterator = paths.iterator();
+                while (iterator.hasNext()) {
+                    iterator.next();
+                    entries = Math.addExact(entries, 1);
+                    if (limit > 0 && entries > limit) break;
+                }
+            }
+        }
+        // Count first, reserve, and settle before touching the tree. A partial
+        // recursive failure conservatively consumes the reservation.
+        FilesystemBudgetService.Reservation reservation = budgets.reserveDelete(memberId, entries);
+        budgets.commitDelete(reservation);
+        if (recursive && directory) {
             try (var paths = Files.walk(target)) {
                 for (Path item : paths.sorted(Comparator.reverseOrder()).toList()) {
                     if (item.equals(target)) continue;
@@ -583,6 +650,8 @@ public final class EligibleStorageService {
         }
         Map<String, Object> metadata = sourceMetadata(root, path, target);
         verifyMetadata(metadata, expectedSize, expectedSha256, expectedVersion);
+        FilesystemBudgetService.Reservation reservation = budgets.reserveDelete(requesterId, 1);
+        budgets.commitDelete(reservation);
         Files.delete(target);
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("deleted", true);

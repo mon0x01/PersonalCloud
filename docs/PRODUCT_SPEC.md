@@ -1,7 +1,7 @@
 # PersonalCloud Product Specification
 
 **Status:** Canonical source of truth (M0)
-**Last updated:** 2026-11-06
+**Last updated:** 2026-11-10
 **Authority:** This document defines the product. Other documents must agree with it. Where they conflict, this document wins.
 
 ---
@@ -338,6 +338,7 @@ This section records the status at the latest completed milestone and is updated
 - Three-peer coordinated transfers (M2.1): a coordinator Z issues a short-lived Ed25519-signed ticket binding source, destination, roots/paths, operation, version, size, digest, expiry, request/transfer identity and optional approvals. X and Y verify independently and durably claim the ticket per role. X streams resumable chunks directly to Y; Z exchanges metadata and status only and never receives bytes. COPY and safe MOVE are implemented with destination commit and source revalidation before deletion, a durable `DELETING` state, honest `COPIED_NOT_MOVED` partial outcomes, idempotent retries and revoked-member rejection. Desktop local control/CLI exposes `coordinated plan/prepare/transfer/status/retry/list`; three-node automated tests cover direct X→Y isolation, invalid/expired/replayed tickets, wrong identities/paths/digests, source mutation, destination failure, interruption recovery, protected approvals and revocation.
 - Delegated admission hardening (M5): signed short-lived `AdmissionApproval` records attributable to the exact approving active member and certificate, post-threshold independent approval by any active member, hardened certificate-chain validation (future issue, parent ordering, duplicate identity, expected root), signed monotonic `MembershipRevocation` records with stale-catalogue conflict rejection, refusal of requests and admissions by revoked members, and explicit broad-filesystem consent during new-device enrollment and existing-device upgrade. Desktop and Android peer cores produce and verify the same records; desktop→Android and Android→desktop admission and revocation are covered by interoperability tests.
 - Protocol and storage reliability hardening (M6): JSON input is bounded to 16 MiB and 64 nesting levels; per-source request, enrollment-challenge and enrollment-submission windows are rate-limited, and authenticated filesystem operations have a per-member window; signed presence binds an advertised endpoint to the member signing key (legacy unsigned presence may not move a certificate-bound endpoint); wildcard, link-local and multicast endpoint literals are rejected; pending protection approvals are bounded per member and per node; transfer sessions are bounded per node and per member with configurable aggregate and per-member staging budgets; durable coordinated-ticket claims are pruned; reference snapshot retention evicts oldest snapshots first; owner-side audit records cover eligible-filesystem mutations and sensitive authorization decisions; startup failure closes partially initialized components. Desktop and Android peer cores implement the same presence and endpoint checks.
+- Member filesystem budgets and audit durability (M7): every member has durable daily write-byte and delete-entry budgets (20 GiB and 10,000 by default, `0` for unlimited, environment-overridable). Writes reserve declared bytes before streaming and settle immediately before publication; recursive deletes settle the entry count before deleting. Per-member overrides are owner-local (`filesystem budget*`), exhaustion returns HTTP `429` with `Retry-After`, and budget changes and rejections are audited. The audit log serializes appends and rotation across JVM and operating-system locks, forces each append, rejects symlinked or non-regular paths, tolerates malformed historical lines and reads newest-first across the current and one retained rotated file.
 
 ### 9.2 Target functionality not yet implemented
 
@@ -349,7 +350,7 @@ This section records the status at the latest completed milestone and is updated
 
 - No independent security audit.
 - Protection approvals are process-local; a restart fails closed and requires fresh approvals.
-- Remote filesystem mutations and sensitive authorization decisions are audited, and filesystem operations are bounded by source and member request windows. Tiered per-member filesystem quotas (for example, distinct bulk-delete budgets) are not yet enforced.
+- Remote filesystem mutations and sensitive authorization decisions are audited and bounded by source/member request windows plus durable daily write-byte and delete-entry budgets. Budget exhaustion is a retryable `429`; partial destructive failure conservatively consumes the delete budget.
 - Fault-injection tests are controlled software simulations of interrupted writes, verification failures and partial commits. They are not a substitute for real disk-full, power-loss, filesystem-corruption or physical-device testing.
 - Broad-access consent is explicit in enrollment and upgrade flows; Android UI copy and migration messaging for the consent prompt remain minimal.
 - Root succession/rotation is not implemented; a compromised or lost root identity requires a new network identity.

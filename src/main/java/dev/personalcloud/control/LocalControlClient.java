@@ -436,6 +436,51 @@ public final class LocalControlClient {
     public Map<String, Object> revokeFilesystemConsent() throws IOException { return request("filesystem.revoke-consent"); }
 
     @SuppressWarnings("unchecked")
+    public List<Map<String, Object>> listFilesystemBudgets() throws IOException {
+        Object rows = request("filesystem.budgets").get("budgets");
+        if (!(rows instanceof List<?> list)) throw new IOException("The control server returned an invalid filesystem budget list.");
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> map)) throw new IOException("The control server returned an invalid filesystem budget entry.");
+            result.add((Map<String, Object>) map);
+        }
+        return List.copyOf(result);
+    }
+
+    public Map<String, Object> filesystemBudget(String memberId) throws IOException {
+        return asMap(request("filesystem.budget",
+                fields("memberId", requireText(memberId, "Member ID"))).get("budget"));
+    }
+
+    public Map<String, Object> setFilesystemBudget(String memberId, long writeBytesPerDay,
+                                                   long deleteEntriesPerDay) throws IOException {
+        if (writeBytesPerDay < 0 || deleteEntriesPerDay < 0) {
+            throw new IllegalArgumentException("Filesystem budget limits cannot be negative.");
+        }
+        return asMap(request("filesystem.budget-set", fields(
+                "memberId", requireText(memberId, "Member ID"),
+                "writeBytesPerDay", writeBytesPerDay,
+                "deleteEntriesPerDay", deleteEntriesPerDay)).get("budget"));
+    }
+
+    public Map<String, Object> clearFilesystemBudget(String memberId) throws IOException {
+        return asMap(request("filesystem.budget-clear",
+                fields("memberId", requireText(memberId, "Member ID"))).get("budget"));
+    }
+
+    @SuppressWarnings("unchecked")
+    public List<Map<String, Object>> listAuditEvents(int limit) throws IOException {
+        Object rows = request("audit.list", fields("limit", Math.max(1, Math.min(limit, 200)))).get("events");
+        if (!(rows instanceof List<?> list)) throw new IOException("The control server returned an invalid audit event list.");
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> map)) throw new IOException("The control server returned an invalid audit event.");
+            result.add((Map<String, Object>) map);
+        }
+        return List.copyOf(result);
+    }
+
+    @SuppressWarnings("unchecked")
     public List<Map<String, Object>> listRemoteShares(String peerId) throws IOException {
         Object rows = request("remote.shares.list", fields("peerId", requireText(peerId, "Peer ID"))).get("shares");
         if (!(rows instanceof List<?> list)) throw new IOException("The control server returned an invalid remote share list.");
@@ -845,6 +890,12 @@ public final class LocalControlClient {
         Object value = map.get(key);
         if (!(value instanceof Number number)) throw new IOException("The control server omitted numeric field '" + key + "'.");
         return number.longValue();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> asMap(Object value) throws IOException {
+        if (!(value instanceof Map<?, ?> map)) throw new IOException("The control server omitted an object field.");
+        return (Map<String, Object>) map;
     }
 
     private static String string(Map<String, Object> map, String key) throws IOException {

@@ -88,7 +88,17 @@ PersonalCloud is a Java-only private network of personally operated devices. Eve
 - Added owner-side audit records for eligible-filesystem writes, directories, moves, deletes, approval requests, admission approval/rejection, revocation, reference-grant changes and filesystem consent. Records contain identifiers, paths and digests, not contents or credentials.
 - Node startup failure now closes the protocol, catalogue, control and file components; protocol close is idempotent.
 - Added `JsonLimitsTest`, `SecurityMonitorRequestLimitTest`, `ProtectionApprovalLimitTest`, `ReferenceVersionRetentionTest`, `StorageFaultInjectionTest`, `TransferQuotaTest` and presence regression assertions. The fault-injection tests cover interrupted streams, digest mismatch, destination conflict, persistence failure after publication, restart recovery, staging cleanup and cancelled snapshots.
-- Automated fault injection does not represent real disk-full, power-loss, filesystem-corruption or physical-device behavior. Those, tiered per-member filesystem quotas, per-member TLS pinning and an independent security audit remain outstanding.
+- Automated fault injection does not represent real disk-full, power-loss, filesystem-corruption or physical-device behavior. Per-member filesystem budgets were added in M7; per-member TLS pinning, real fault testing and an independent security audit remain outstanding.
+
+### Member filesystem budgets and audit durability (M7) — 2026-11-10
+- Added `FilesystemBudgetService`, a durable per-member ledger for daily write bytes and deleted entries. Defaults are 20 GiB and 10,000 entries per UTC day; `PERSONALCLOUD_MEMBER_DAILY_WRITE_BYTES` and `PERSONALCLOUD_MEMBER_DAILY_DELETE_ENTRIES` override them, and `0` means unlimited.
+- Writes reserve their declared size before streaming and settle immediately before publication. Verification failures, denied approvals, destination conflicts and interrupted streams release the reservation; a failure after settlement conservatively consumes the budget.
+- Recursive deletes count entries and settle the delete budget before deleting anything, so an over-budget bulk delete leaves the tree intact. Single and coordinated source deletes charge one entry.
+- Per-member overrides are available through `filesystem budgets`, `filesystem budget`, `filesystem budget-set` and `filesystem budget-clear` over local control/CLI, with owner-side audit records for changes.
+- An exhausted budget maps to HTTP `429` with `Retry-After` and accounting metadata, plus a `FILESYSTEM_BUDGET_EXCEEDED` audit record. Existing rate-limit and protection-approval behavior is unchanged.
+- `AuditLog` now serializes appends and rotation across JVM and operating-system locks, forces each append to disk, rotates under the lock, rejects symlinked or non-regular audit paths, skips malformed historical lines and reads newest-first from the current plus one retained rotated file. `audit [list] [limit]` exposes recent records locally.
+- Added `FilesystemBudgetTest` and `AuditLogConcurrencyTest`, and extended `LocalControlClientTest` and `EligibleStorageIntegrationTest` with budget, audit and remote over-budget coverage.
+- The complete `./scripts/test-all.sh` suite passed after these changes. Real disk-full/power-loss behavior, per-member TLS pinning, physical-device acceptance and an independent security audit remain outstanding.
 
 ### Android integration (peer-core tested; app framework build pending)
 - Android peer-core now implements the same password-proof enrollment, explicit approval, Ed25519 membership certificates, signed active-member requests, replay protection, member catalogue and revocation model as desktop.
@@ -111,7 +121,7 @@ Run the complete automated suite from the repository root:
 ./scripts/test-all.sh
 ```
 
-This builds the desktop Java node; runs desktop storage, control, membership, network-protocol, remote-reference, managed-storage and remote byte-range integrity tests; runs Android peer-core and simulated desktop–Android interoperability tests; statically validates Android app integration; and performs Linux integration shell/static checks. It does not require a physical Android device, KDE session, Android SDK or native FUSE mount. The complete scoped suite passed on 2026-11-10 after the M6 hardening changes.
+This builds the desktop Java node; runs desktop storage, control, membership, network-protocol, remote-reference, managed-storage and remote byte-range integrity tests; runs Android peer-core and simulated desktop–Android interoperability tests; statically validates Android app integration; and performs Linux integration shell/static checks. It does not require a physical Android device, KDE session, Android SDK or native FUSE mount. The complete scoped suite passed on 2026-11-10 after the M7 budget and audit-hardening changes.
 
 ## Remaining implementation scope
 
@@ -121,7 +131,7 @@ This builds the desktop Java node; runs desktop storage, control, membership, ne
 - Physical Android APK/SAF/lifecycle validation and live Linux FUSE mount validation.
 - Transfer UX must persist and present the transfer ID/progress across app restarts; the receiver protocol and peer-core resume APIs are implemented, but end-user UI recovery needs device validation.
 - Read-only desktop direct-connectivity diagnostics now enumerate interfaces, validate local TLS material and compare bounded STUN UDP mappings. Global interface candidates are reported independently from the configured bind address, with a separate bound-family match field. A desktop TLS provisioning script now creates an encrypted local CA key and a SAN-correct PKCS#12 server identity for active non-temporary interface addresses without opening the listener or changing firewall settings. Actual inbound HTTPS reachability from another network, CGNAT behavior and public IPv6 acceptance still require independent devices/networks.
-- Real disk-full, abrupt power-loss and filesystem-corruption fault testing; load/concurrency tests at large file sizes; long-duration stability; performance profiling; tiered per-member filesystem quotas; per-member TLS certificate pinning; independent security audit; and real-device acceptance tests. There is deliberately no relay fallback.
+- Real disk-full, abrupt power-loss and filesystem-corruption fault testing; load/concurrency tests at large file sizes; long-duration stability; performance profiling; per-member TLS certificate pinning; independent security audit; and real-device acceptance tests. There is deliberately no relay fallback.
 
 ## Validation boundary
 

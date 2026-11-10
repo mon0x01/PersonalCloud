@@ -32,6 +32,7 @@ for test in \
   dev.personalcloud.core.StateStoreAtomicityTest \
   dev.personalcloud.core.StateStoreMultiProcessTest \
   dev.personalcloud.core.StateStorePathSafetyTest \
+  dev.personalcloud.core.AuditLogConcurrencyTest \
   dev.personalcloud.core.FileServiceUploadAtomicityTest \
   dev.personalcloud.core.SecurityMonitorRequestLimitTest \
   dev.personalcloud.core.VersionServiceTest \
@@ -39,6 +40,7 @@ for test in \
   dev.personalcloud.storage.ReferenceStorageServiceTest \
   dev.personalcloud.storage.ReferenceVersionRetentionTest \
   dev.personalcloud.storage.StorageFaultInjectionTest \
+  dev.personalcloud.storage.FilesystemBudgetTest \
   dev.personalcloud.storage.EligibleStorageServiceTest \
   dev.personalcloud.control.LocalControlClientTest \
   dev.personalcloud.storage.ReferenceFileSystemModelCacheTest \

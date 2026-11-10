@@ -355,6 +355,25 @@ public final class EligibleStorageIntegrationTest {
                     "native browsing must not expose PRIVATE directories");
             destinationPolicy.remove(rootId, "Private");
 
+            // Per-member daily budgets are enforced at the source before any
+            // bytes are published and are reported as a retryable rejection.
+            Map<String, Object> currentBudget = destinationFilesystem.budgetStatus(rootConfig.nodeId());
+            long usedBytes = ((Number) currentBudget.get("writeBytesUsed")).longValue();
+            destinationFilesystem.setMemberBudget(rootConfig.nodeId(), usedBytes + 1, 1000);
+            Path budgetUpload = workspace.resolve("budget-upload.txt");
+            Files.writeString(budgetUpload, "over budget", StandardCharsets.UTF_8);
+            expectFailure(() -> client.uploadFilesystemFile(destinationUrl, rootId,
+                            "Documents/budget-over.txt", budgetUpload, false, "", rootMembership,
+                            destinationConfig.maxFileBytes()),
+                    "a remote write over the daily byte budget must be rejected");
+            check(!Files.exists(documents.resolve("budget-over.txt")),
+                    "an over-budget remote write must publish nothing");
+            destinationFilesystem.clearMemberBudget(rootConfig.nodeId());
+            client.uploadFilesystemFile(destinationUrl, rootId, "Documents/budget-ok.txt", budgetUpload,
+                    false, "", rootMembership, destinationConfig.maxFileBytes());
+            check(Files.exists(documents.resolve("budget-ok.txt")),
+                    "clearing a budget override must restore normal writes");
+
             destinationFilesystem.revokeConsent();
             expectFailure(() -> nativeFilesystem.list(nativeRoot),
                     "native operations must fail immediately after consent revocation");
